@@ -3,6 +3,7 @@
 import logging
 
 from src.core.brain import MotorDecisiones
+from src.config.settings import configuracion
 from src.services.context_api import GestorContexto
 from src.services.meta_api import GestorMetaAds
 from src.services.whatsapp_bot import NotificadorWhatsApp
@@ -14,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Ejecuta el flujo principal de la aplicación."""
-    gestor_contexto = GestorContexto()
+    gestor_contexto = GestorContexto(configuracion)
     motor_decisiones = MotorDecisiones()
-    gestor_meta_ads = GestorMetaAds()
-    notificador = NotificadorWhatsApp()
+    gestor_meta_ads = GestorMetaAds(configuracion)
+    notificador = NotificadorWhatsApp(configuracion)
 
     contexto = gestor_contexto.obtener_contexto()
     acciones = motor_decisiones.obtener_acciones(contexto)
