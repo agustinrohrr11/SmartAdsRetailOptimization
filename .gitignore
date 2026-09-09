@@ -1,0 +1,16 @@
+# Secretos y configuración local
+.env
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Cachés de Python
+__pycache__/
+*.py[cod]
+
+# Herramientas y archivos locales
+.vscode/
+.pytest_cache/
+.mypy_cache/
