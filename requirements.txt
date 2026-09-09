@@ -2,4 +2,3 @@ facebook-business
 holidays
 python-dotenv
 requests
-twilio

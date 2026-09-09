@@ -37,12 +37,9 @@ class Configuracion:
 	META_MAX_INCREASE_PERCENT: float = field(default_factory=lambda: _obtener_float("META_MAX_INCREASE_PERCENT", 50.0))
 	MODO_SIMULACION: bool = field(default_factory=lambda: _obtener_booleano("MODO_SIMULACION", True))
 
-	TWILIO_ACCOUNT_SID: str = field(default_factory=lambda: os.getenv("TWILIO_ACCOUNT_SID", ""))
-	TWILIO_AUTH_TOKEN: str = field(default_factory=lambda: os.getenv("TWILIO_AUTH_TOKEN", ""))
-	TWILIO_FROM_WHATSAPP: str = field(default_factory=lambda: os.getenv("TWILIO_FROM_WHATSAPP", ""))
-	TWILIO_TO_WHATSAPP: str = field(default_factory=lambda: os.getenv("TWILIO_TO_WHATSAPP", ""))
-	TWILIO_CONTENT_SID: str = field(default_factory=lambda: os.getenv("TWILIO_CONTENT_SID", ""))
-	ENVIAR_WHATSAPP: bool = field(default_factory=lambda: _obtener_booleano("ENVIAR_WHATSAPP", False))
+	TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+	TELEGRAM_CHAT_ID: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+	ENVIAR_TELEGRAM: bool = field(default_factory=lambda: _obtener_booleano("ENVIAR_TELEGRAM", False))
 
 	LATITUD: float = field(default_factory=lambda: _obtener_float("LATITUD", 0.0))
 	LONGITUD: float = field(default_factory=lambda: _obtener_float("LONGITUD", 0.0))
@@ -76,20 +73,18 @@ class Configuracion:
 		if faltantes:
 			raise ValueError("Falta configuración de Meta Ads: " + ", ".join(faltantes))
 
-	def validar_twilio(self) -> None:
-		"""Valida la configuración necesaria para enviar un WhatsApp."""
+	def validar_telegram(self) -> None:
+		"""Valida la configuración necesaria para enviar un mensaje de Telegram."""
 		faltantes = [
 			nombre
 			for nombre, valor in {
-				"TWILIO_ACCOUNT_SID": self.TWILIO_ACCOUNT_SID,
-				"TWILIO_AUTH_TOKEN": self.TWILIO_AUTH_TOKEN,
-				"TWILIO_FROM_WHATSAPP": self.TWILIO_FROM_WHATSAPP,
-				"TWILIO_TO_WHATSAPP": self.TWILIO_TO_WHATSAPP,
+				"TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
+				"TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
 			}.items()
 			if not valor
 		]
 		if faltantes:
-			raise ValueError("Falta configuración de Twilio: " + ", ".join(faltantes))
+			raise ValueError("Falta configuración de Telegram: " + ", ".join(faltantes))
 
 
 configuracion = Configuracion()

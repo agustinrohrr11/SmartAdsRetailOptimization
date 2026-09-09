@@ -8,7 +8,7 @@ Este es un sistema automatizado para gestionar campañas de Meta Ads (Facebook/I
 *   **APIs Externas:** 
     *   `facebook-business` (Meta Marketing API SDK) para modificar ads.
     *   `requests` para consumir OpenMeteo (Clima).
-    *   `twilio` (Twilio Sandbox for WhatsApp) para enviar reportes diarios.
+    *   API HTTP de Telegram para enviar reportes diarios.
 *   **Librerías Auxiliares:** `datetime`, `holidays` (para feriados en Argentina), `python-dotenv` (para variables de entorno).
 
 ## Estructura del Código
@@ -16,7 +16,7 @@ El proyecto sigue un patrón modular. Cuando sugieras código, respeta esta sepa
 *   `context_api.py`: Funciones puras para obtener clima y fechas.
 *   `brain.py`: Contiene la lógica de negocio y las reglas condicionales puras. No hace peticiones de red, solo recibe diccionarios y devuelve listas de acciones.
 *   `meta_api.py`: Contiene las clases/funciones para interactuar con el SDK de Meta.
-*   `whatsapp_bot.py`: Módulo aislado para enviar el resumen del día usando Twilio.
+*   `telegram_bot.py`: Módulo aislado para enviar el resumen del día usando Telegram.
 *   `main.py`: El orquestador que importa todos los módulos y ejecuta el flujo secuencial.
 
 ## Reglas de Programación y Estilo

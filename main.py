@@ -6,7 +6,7 @@ from src.core.brain import MotorDecisiones
 from src.config.settings import configuracion
 from src.services.context_api import GestorContexto
 from src.services.meta_api import GestorMetaAds
-from src.services.whatsapp_bot import NotificadorWhatsApp
+from src.services.telegram_bot import NotificadorTelegram
 
 
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +18,7 @@ def main() -> None:
     gestor_contexto = GestorContexto(configuracion)
     motor_decisiones = MotorDecisiones()
     gestor_meta_ads = GestorMetaAds(configuracion)
-    notificador = NotificadorWhatsApp(configuracion)
+    notificador = NotificadorTelegram(configuracion)
 
     contexto = gestor_contexto.obtener_contexto()
     acciones = motor_decisiones.obtener_acciones(contexto)

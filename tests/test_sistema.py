@@ -6,7 +6,7 @@ from src.config.settings import Configuracion
 from src.core.brain import MotorDecisiones
 from src.services.context_api import DatosContexto, GestorContexto
 from src.services.meta_api import GestorMetaAds
-from src.services.whatsapp_bot import NotificadorWhatsApp
+from src.services.telegram_bot import NotificadorTelegram
 
 
 class TestMotorDecisiones(unittest.TestCase):
@@ -59,27 +59,54 @@ class TestIntegracionesSeguras(unittest.TestCase):
         gestor.activar_campana("Asado")
         gestor.modificar_presupuesto("Asado", 30)
 
-    def test_twilio_desactivado_no_crea_cliente(self) -> None:
-        notificador = NotificadorWhatsApp(
-            Configuracion(ENVIAR_WHATSAPP=False)
+    def test_telegram_desactivado_no_envia(self) -> None:
+        cliente = Mock()
+        notificador = NotificadorTelegram(
+            Configuracion(ENVIAR_TELEGRAM=False), cliente_http=cliente
         )
         self.assertIsNone(
             notificador.enviar_reporte(DatosContexto(0, False, False), [])
         )
-        self.assertIsNone(notificador.cliente)
+        cliente.post.assert_not_called()
 
-    def test_twilio_se_puede_habilitar_con_meta_simulada(self) -> None:
+    def test_telegram_envia_reporte_con_cliente_simulado(self) -> None:
+        respuesta = Mock()
+        respuesta.json.return_value = {
+            "ok": True,
+            "result": {"message_id": 42},
+        }
         cliente = Mock()
-        cliente.messages.create.return_value.sid = "SM-prueba"
-        notificador = NotificadorWhatsApp(
-            Configuracion(MODO_SIMULACION=True, ENVIAR_WHATSAPP=True),
-            cliente=cliente,
+        cliente.post.return_value = respuesta
+        notificador = NotificadorTelegram(
+            Configuracion(
+                ENVIAR_TELEGRAM=True,
+                TELEGRAM_BOT_TOKEN="token-prueba",
+                TELEGRAM_CHAT_ID="chat-prueba",
+            ),
+            cliente_http=cliente,
         )
         resultado = notificador.enviar_reporte(
             DatosContexto(0, False, False), []
         )
-        self.assertEqual(resultado, "SM-prueba")
-        cliente.messages.create.assert_called_once()
+        self.assertEqual(resultado, 42)
+        cliente.post.assert_called_once()
+
+    def test_telegram_maneja_error_de_red(self) -> None:
+        import requests
+
+        cliente = Mock()
+        cliente.post.side_effect = requests.RequestException("fallo")
+        notificador = NotificadorTelegram(
+            Configuracion(
+                ENVIAR_TELEGRAM=True,
+                TELEGRAM_BOT_TOKEN="token-prueba",
+                TELEGRAM_CHAT_ID="chat-prueba",
+            ),
+            cliente_http=cliente,
+        )
+        self.assertIsNone(
+            notificador.enviar_reporte(DatosContexto(0, False, False), [])
+        )
 
 
 if __name__ == "__main__":
