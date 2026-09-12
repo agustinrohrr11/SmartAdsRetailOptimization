@@ -2,3 +2,4 @@ facebook-business
 holidays
 python-dotenv
 requests
+python-telegram-bot[job-queue]>=20,<22

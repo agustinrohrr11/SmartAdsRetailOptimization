@@ -30,6 +30,7 @@ class Configuracion:
 
 	META_ACCESS_TOKEN: str = field(default_factory=lambda: os.getenv("META_ACCESS_TOKEN", ""))
 	META_ACCOUNT_ID: str = field(default_factory=lambda: os.getenv("META_ACCOUNT_ID", ""))
+	META_CAMPAIGN_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ID", ""))
 	META_CAMPAIGN_ASADO_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ASADO_ID", ""))
 	META_CAMPAIGN_ESTOFADO_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ESTOFADO_ID", ""))
 	META_CAMPAIGN_ECONOMICOS_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ECONOMICOS_ID", ""))
@@ -58,6 +59,26 @@ class Configuracion:
 			"Estofado": self.META_CAMPAIGN_ESTOFADO_ID,
 			"Económicos/Picada": self.META_CAMPAIGN_ECONOMICOS_ID,
 		}
+
+	@property
+	def identificador_cuenta_meta(self) -> str:
+		"""Devuelve el ID de cuenta en el formato requerido por Meta."""
+		identificador = self.META_ACCOUNT_ID.strip()
+		return identificador if identificador.startswith("act_") else f"act_{identificador}"
+
+	def validar_campana_principal(self) -> None:
+		"""Valida la campaña única administrada por el bot."""
+		faltantes = [
+			nombre
+			for nombre, valor in {
+				"META_ACCESS_TOKEN": self.META_ACCESS_TOKEN,
+				"META_ACCOUNT_ID": self.META_ACCOUNT_ID,
+				"META_CAMPAIGN_ID": self.META_CAMPAIGN_ID,
+			}.items()
+			if not valor
+		]
+		if faltantes:
+			raise ValueError("Falta configuración de Meta Ads: " + ", ".join(faltantes))
 
 	def validar_meta(self) -> None:
 		"""Valida la configuración necesaria para ejecutar Meta Ads realmente."""

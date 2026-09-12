@@ -1,0 +1,22 @@
+{
+  "anuncios": {
+    "asado": {
+      "activo": false,
+      "hora_activacion": "6:00",
+      "hora_desactivacion": "19:00",
+      "temperatura_minima": 0.0,
+      "temperatura_maxima": 50.0,
+      "lluvia_minima": 0.0,
+      "lluvia_maxima": 60.0,
+      "dias": {
+        "L": true,
+        "MA": true,
+        "MI": true,
+        "J": false,
+        "V": false,
+        "S": false,
+        "D": false
+      }
+    }
+  }
+}
