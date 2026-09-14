@@ -54,8 +54,11 @@ class OrquestadorAsincrono:
                     self.meta.activar_conjunto(accion.identificador, accion.nombre_anuncio)
                 else:
                     self.meta.pausar_conjunto(accion.identificador, accion.nombre_anuncio)
+                self._reflejar_estado_en_cache(anuncios, accion)
             except (RuntimeError, ValueError):
                 logger.exception("No se pudo aplicar %s a '%s'", accion.accion, accion.nombre_anuncio)
+        self.bot.ultimo_estado["clima"] = datos_clima
+        self.bot.ultimo_estado["anuncios"] = anuncios
 
     async def enviar_reporte(self, contexto_job: Any) -> None:
         """Envía el reporte con una lectura fresca de clima y Meta."""
@@ -66,16 +69,35 @@ class OrquestadorAsincrono:
             logger.exception("Se omite el reporte por un error de Meta Ads")
             await self.bot.enviar_alerta(str(error))
             return
+        self.bot.ultimo_estado["clima"] = datos_clima
+        self.bot.ultimo_estado["anuncios"] = anuncios
         await self.bot.enviar_reporte_diario(datos_clima, anuncios)
+
+    @staticmethod
+    def _reflejar_estado_en_cache(
+        anuncios: list[dict[str, str]], accion: Any
+    ) -> None:
+        """Actualiza el estado en la lista cacheada sin reconsultar Meta."""
+        estado = "ACTIVE" if accion.accion == "ACTIVAR" else "PAUSED"
+        for anuncio in anuncios:
+            if str(anuncio.get("id", "")) == accion.identificador:
+                anuncio["status"] = estado
+                return
 
     def construir_aplicacion(self) -> Any:
         """Construye el bot y registra los tres jobs programados."""
         aplicacion = self.bot.construir_aplicacion()
         if aplicacion.job_queue is None:
             raise RuntimeError("JobQueue no está disponible; instala el extra job-queue")
-        aplicacion.job_queue.run_repeating(self.evaluar_anuncios, interval=1800, first=0)
-        aplicacion.job_queue.run_daily(self.enviar_reporte, time=time(hour=6, minute=0))
-        aplicacion.job_queue.run_daily(self.enviar_reporte, time=time(hour=15, minute=0))
+        aplicacion.job_queue.run_repeating(
+            self.evaluar_anuncios, interval=1800, first=0, name="evaluar_anuncios"
+        )
+        aplicacion.job_queue.run_daily(
+            self.enviar_reporte, time=time(hour=6, minute=0), name="reporte_6"
+        )
+        aplicacion.job_queue.run_daily(
+            self.enviar_reporte, time=time(hour=15, minute=0), name="reporte_15"
+        )
         return aplicacion
 
 

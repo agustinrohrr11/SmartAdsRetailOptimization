@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -260,7 +260,7 @@ class TestReglasDinamicas(unittest.TestCase):
         self.assertIn("L[], MA[.]", plantilla)
 
     def test_chat_no_autorizado_recibe_denegacion(self) -> None:
-        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123"))
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
         mensaje = Mock()
         mensaje.reply_text = AsyncMock()
         actualizacion = Mock(effective_chat=Mock(id=999), message=mensaje)
@@ -268,8 +268,22 @@ class TestReglasDinamicas(unittest.TestCase):
         self.assertFalse(autorizado)
         mensaje.reply_text.assert_awaited_once_with("Acceso denegado.")
 
+    def test_chats_autorizados_separados_por_coma(self) -> None:
+        ajustes = Configuracion(TELEGRAM_CHAT_ID="123, 456,, 789 ")
+        self.assertEqual(ajustes.chats_autorizados, ["123", "456", "789"])
+
+    def test_segundo_chat_autorizado_tambien_accede(self) -> None:
+        bot = BotTelegram(
+            Configuracion(TELEGRAM_CHAT_ID="123, 456", ENVIAR_TELEGRAM=False)
+        )
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=456), message=mensaje)
+        autorizado = asyncio.run(bot._exigir_chat_autorizado(actualizacion))
+        self.assertTrue(autorizado)
+
     def test_reporte_diario_envia_mensaje(self) -> None:
-        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123"))
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
         bot.reglas = Mock()
         bot.reglas.obtener.return_value = None
         bot._enviar_mensaje = AsyncMock()
@@ -290,6 +304,48 @@ class TestReglasDinamicas(unittest.TestCase):
         self.assertIn("- Asado", mensaje)
         self.assertIn("Sin configurar:", mensaje)
         self.assertIn("- Estofado", mensaje)
+
+    def test_construir_reporte_incluye_datos_clave(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = None
+        contexto = DatosContexto(30, False, False, descripcion_clima="Despejado", temperatura=25)
+        mensaje = bot._construir_reporte(contexto, [{"name": "Asado", "status": "ACTIVE"}])
+        self.assertIn("Despejado", mensaje)
+        self.assertIn("- Asado", mensaje)
+
+    def test_adsinfo_responde_ultima_lectura_sin_consultar_meta(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.meta = Mock()
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = None
+        bot.ultimo_estado["clima"] = DatosContexto(
+            30, False, False, descripcion_clima="Despejado", temperatura=25
+        )
+        bot.ultimo_estado["anuncios"] = [{"name": "Asado", "status": "ACTIVE"}]
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        asyncio.run(bot.adsinfo(actualizacion, Mock()))
+        bot.meta.obtener_conjuntos.assert_not_called()
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("Anuncios corriendo:", respuesta)
+        self.assertIn("- Asado", respuesta)
+
+    def test_adsinfo_sin_datos_avisa_proxima_lectura(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        job_queue = Mock()
+        job = Mock()
+        job.name = "evaluar_anuncios"
+        job.next_t = datetime.now(timezone.utc) + timedelta(minutes=15, seconds=40)
+        job_queue.jobs.return_value = [job]
+        asyncio.run(bot.adsinfo(actualizacion, Mock(job_queue=job_queue)))
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("aproximadamente 16 minutos", respuesta)
 
 
 if __name__ == "__main__":

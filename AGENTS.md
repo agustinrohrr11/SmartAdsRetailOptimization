@@ -25,3 +25,4 @@ El proyecto sigue un patrón modular. Cuando sugieras código, respeta esta sepa
 3.  **Logs y Manejo de Errores:** Usa el módulo `logging` de Python en lugar de `print()`. Maneja siempre las excepciones de red (ej. si la API del clima no responde, asume que no llueve para no frenar la ejecución).
 4.  **Tipado:** Usa Type Hints (`-> list`, `: dict`, etc.) en todas las funciones.
 5.  **paradigma:** Usa el paradigma de programacion orientado a objetos.
+6.  **Seguridad en Telegram:** Cualquier comunicación con el bot que no provenga de un chat autorizado (el configurado en `TELEGRAM_CHAT_ID`, aceptando varios IDs separados por coma) debe ignorarse por razones de seguridad: no debe procesarse ninguna plantilla, persistirse configuraciones ni ejecutarse acciones sobre Meta.

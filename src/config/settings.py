@@ -1,11 +1,14 @@
 """Configuración de la aplicación."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 def _obtener_booleano(nombre: str, valor_predeterminado: bool) -> bool:
@@ -52,6 +55,15 @@ class Configuracion:
 		identificador = self.META_ACCOUNT_ID.strip()
 		return identificador if identificador.startswith("act_") else f"act_{identificador}"
 
+	@property
+	def chats_autorizados(self) -> list[str]:
+		"""Devuelve los chats de Telegram autorizados, separados por coma."""
+		return [
+			identificador.strip()
+			for identificador in self.TELEGRAM_CHAT_ID.split(",")
+			if identificador.strip()
+		]
+
 	def validar_campana_principal(self) -> None:
 		"""Valida la campaña única administrada por el bot."""
 		faltantes = [
@@ -68,16 +80,17 @@ class Configuracion:
 
 	def validar_telegram(self) -> None:
 		"""Valida la configuración necesaria para enviar un mensaje de Telegram."""
-		faltantes = [
-			nombre
-			for nombre, valor in {
-				"TELEGRAM_BOT_TOKEN": self.TELEGRAM_BOT_TOKEN,
-				"TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
-			}.items()
-			if not valor
-		]
-		if faltantes:
-			raise ValueError("Falta configuración de Telegram: " + ", ".join(faltantes))
+		if not self.TELEGRAM_BOT_TOKEN:
+			raise ValueError("Falta configuración de Telegram: TELEGRAM_BOT_TOKEN")
+		if self.TELEGRAM_CHAT_ID and not self.chats_autorizados:
+			logger.warning(
+				"TELEGRAM_CHAT_ID tiene un formato inválido "
+				"(separar los IDs con coma): '%s'",
+				self.TELEGRAM_CHAT_ID,
+			)
+			raise ValueError("Formato inválido de TELEGRAM_CHAT_ID: " + self.TELEGRAM_CHAT_ID)
+		if not self.chats_autorizados:
+			raise ValueError("Falta configuración de Telegram: TELEGRAM_CHAT_ID")
 
 
 configuracion = Configuracion()

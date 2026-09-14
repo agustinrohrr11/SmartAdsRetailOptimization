@@ -2,6 +2,7 @@
 
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ class BotTelegram:
 + Dias de la semana: L[], MA[], MI[], J[], V[], S[], D[]. rellenar con un punto.
 """
 
+    NOMBRES_JOBS_LECTURA: set[str] = {"evaluar_anuncios", "reporte_6", "reporte_15"}
+
     def __init__(
         self,
         ajustes: Configuracion = configuracion,
@@ -37,6 +40,9 @@ class BotTelegram:
             clave_principal="conjuntos",
         )
         self.meta = meta
+        self.ultimo_estado: dict[str, Any] = {"clima": None, "anuncios": []}
+        if self.ajustes.ENVIAR_TELEGRAM:
+            self.ajustes.validar_telegram()
 
     def construir_aplicacion(self) -> Any:
         """Construye la aplicación de python-telegram-bot v20+ y sus handlers."""
@@ -57,6 +63,7 @@ class BotTelegram:
         aplicacion.add_handler(CommandHandler("comandos", self.comandos))
         aplicacion.add_handler(CommandHandler("ads", self.ads))
         aplicacion.add_handler(CommandHandler("adsconfig", self.ads_config))
+        aplicacion.add_handler(CommandHandler("adsinfo", self.adsinfo))
         aplicacion.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.procesar_mensaje)
         )
@@ -69,7 +76,8 @@ class BotTelegram:
         await actualizacion.message.reply_text(
             "/comandos - Lista los comandos disponibles.\n"
             "/ads - Lista anuncios y su configuración.\n"
-            "/adsconfig [nombre_anuncio] - Muestra la plantilla de configuración."
+            "/adsconfig [nombre_anuncio] - Muestra la plantilla de configuración.\n"
+            "/adsinfo - Muestra el reporte actual con clima y estado de anuncios."
         )
 
     async def ads(self, actualizacion: Any, contexto: Any) -> None:
@@ -95,6 +103,25 @@ class BotTelegram:
                 f"[{texto_configuracion}]"
             )
         await actualizacion.message.reply_text("\n".join(lineas) or "No hay anuncios.")
+
+    async def adsinfo(self, actualizacion: Any, contexto: Any) -> None:
+        """Reporte bajo demanda: clima y estado de anuncios desde la última lectura."""
+        if not await self._exigir_chat_autorizado(actualizacion):
+            return
+        clima = self.ultimo_estado["clima"]
+        anuncios = self.ultimo_estado["anuncios"]
+        if clima is None or not anuncios:
+            texto_aviso = "Aún no hay datos disponibles."
+            minutos = self._calcular_proxima_lectura(contexto)
+            if minutos is not None:
+                texto_aviso += f"\nLa próxima lectura será en aproximadamente {minutos} minutos."
+            else:
+                texto_aviso += "\nEl próximo ciclo ocurrirá en breve."
+            await actualizacion.message.reply_text(texto_aviso)
+            return
+        await actualizacion.message.reply_text(
+            self._construir_reporte(clima, anuncios)
+        )
 
     async def ads_config(self, actualizacion: Any, contexto: Any) -> None:
         """Entrega la plantilla y recuerda el anuncio a configurar."""
@@ -141,12 +168,14 @@ class BotTelegram:
                     return
                 self.meta.pausar_conjunto_por_nombre(nombre)
                 self.reglas.actualizar_estado(nombre, False)
+                logger.info("Conjunto '%s' desactivado: regla conservada, conjunto pausado", nombre)
                 await actualizacion.message.reply_text(
                     f"La configuración de '{nombre}' se conservó, el conjunto quedó pausado "
                     "y la campaña permanece activa."
                 )
             else:
                 self.reglas.guardar(nombre, configuracion)
+                logger.info("Configuración de '%s' guardada en reglas", nombre)
                 await actualizacion.message.reply_text(
                     f"Configuración de '{nombre}' guardada correctamente."
                 )
@@ -160,13 +189,10 @@ class BotTelegram:
         contexto.user_data.pop("anuncio_configuracion", None)
 
     async def _exigir_chat_autorizado(self, actualizacion: Any) -> bool:
-        """Permite operar únicamente al chat configurado en TELEGRAM_CHAT_ID."""
+        """Permite operar únicamente a chats autorizados (TELEGRAM_CHAT_ID)."""
         chat = getattr(actualizacion, "effective_chat", None)
         identificador_chat = getattr(chat, "id", None)
-        autorizado = (
-            bool(self.ajustes.TELEGRAM_CHAT_ID)
-            and str(identificador_chat) == self.ajustes.TELEGRAM_CHAT_ID.strip()
-        )
+        autorizado = str(identificador_chat) in self.ajustes.chats_autorizados
         if autorizado:
             return True
         mensaje = getattr(actualizacion, "message", None)
@@ -207,12 +233,10 @@ class BotTelegram:
             + ". rellenar con un punto.\n"
         )
 
-    async def enviar_reporte_diario(
-        self,
-        contexto_clima: Any,
-        anuncios: list[dict[str, str]],
-    ) -> None:
-        """Envía el clima, anuncios activos y alerta de faltantes al chat configurado."""
+    def _construir_reporte(
+        self, contexto_clima: Any, anuncios: list[dict[str, str]]
+    ) -> str:
+        """Construye el texto del reporte para uso manual y automático."""
         activos = [
             str(anuncio.get("name", ""))
             for anuncio in anuncios
@@ -223,7 +247,7 @@ class BotTelegram:
             for anuncio in anuncios
             if self.reglas.obtener(str(anuncio.get("name", ""))) is None
         ]
-        mensaje = (
+        return (
             "Reporte Smart-Ads Retail\n\n"
             f"Clima: {contexto_clima.descripcion_clima}\n"
             f"Temperatura: {contexto_clima.temperatura if contexto_clima.temperatura is not None else 'Sin datos'} °C\n"
@@ -233,27 +257,67 @@ class BotTelegram:
             + "\n\nAlerta, anuncios Sin configurar:\n"
             + ("\n".join(f"- {nombre}" for nombre in sin_configurar) or "- Ninguno")
         )
-        if not self.ajustes.TELEGRAM_CHAT_ID:
-            logger.warning("No se puede enviar reporte: falta TELEGRAM_CHAT_ID")
+
+    async def enviar_reporte_diario(
+        self,
+        contexto_clima: Any,
+        anuncios: list[dict[str, str]],
+    ) -> None:
+        """Envía el reporte a todos los chats autorizados."""
+        if not self.ajustes.chats_autorizados:
+            logger.warning("No se puede enviar reporte: no hay chats autorizados")
             return
+        mensaje = self._construir_reporte(contexto_clima, anuncios)
         await self._enviar_mensaje(mensaje)
+        logger.info(
+            "Reporte diario enviado a %d chat(s)", len(self.ajustes.chats_autorizados)
+        )
 
     async def enviar_alerta(self, mensaje: str) -> None:
-        """Envía una alerta operativa al chat autorizado."""
-        if not self.ajustes.TELEGRAM_CHAT_ID:
-            logger.warning("No se puede enviar alerta: falta TELEGRAM_CHAT_ID")
+        """Envía una alerta operativa a los chats autorizados."""
+        if not self.ajustes.chats_autorizados:
+            logger.warning("No se puede enviar alerta: no hay chats autorizados")
             return
         try:
             await self._enviar_mensaje("ALERTA Smart-Ads Retail\n\n" + mensaje)
+            logger.info(
+                "Alerta operativa enviada a %d chat(s)", len(self.ajustes.chats_autorizados)
+            )
         except Exception:
             logger.exception("No se pudo enviar la alerta operativa por Telegram")
 
     async def _enviar_mensaje(self, mensaje: str) -> None:
-        """Envía un mensaje usando el bot asíncrono de la aplicación."""
+        """Envía un mensaje a todos los chats autorizados."""
         from telegram import Bot
 
         async with Bot(self.ajustes.TELEGRAM_BOT_TOKEN) as bot:
-            await bot.send_message(chat_id=self.ajustes.TELEGRAM_CHAT_ID, text=mensaje)
+            for chat_id in self.ajustes.chats_autorizados:
+                try:
+                    await bot.send_message(chat_id=chat_id, text=mensaje)
+                except Exception:
+                    logger.exception("No se pudo enviar mensaje a chat_id=%s", chat_id)
+
+    @classmethod
+    def _calcular_proxima_lectura(cls, contexto: Any) -> int | None:
+        """Devuelve los minutos hasta la próxima lectura de datos."""
+        job_queue = getattr(contexto, "job_queue", None)
+        if job_queue is None:
+            return None
+        ahora = datetime.now(timezone.utc)
+        proximas = []
+        for job in job_queue.jobs():
+            nombre = getattr(job, "name", None)
+            next_t = getattr(job, "next_t", None)
+            if nombre in cls.NOMBRES_JOBS_LECTURA and next_t is not None:
+                proximas.append(next_t)
+        if not proximas:
+            return None
+        diff = min(proximas) - ahora
+        total_segundos = max(diff.total_seconds(), 0)
+        minutos = int(total_segundos // 60)
+        if total_segundos % 60 > 30:
+            minutos += 1
+        return minutos if minutos > 0 else None
 
     @classmethod
     def _parsear_plantilla(cls, texto: str, nombre: str) -> dict[str, Any] | None:
