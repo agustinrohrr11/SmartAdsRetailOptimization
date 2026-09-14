@@ -26,10 +26,15 @@ class OrquestadorAsincrono:
     def __init__(self) -> None:
         self.contexto = GestorContexto(configuracion)
         self.motor = MotorDecisiones()
-        self.meta = GestorMetaAds(configuracion)
         self.reglas = GestorReglasNegocio(
             Path(__file__).parent / "src" / "config" / "reglas_conjuntos.json",
             clave_principal="conjuntos",
+        )
+        self.meta = GestorMetaAds(
+            configuracion,
+            nombres_adsets_simulados=lambda: list(
+                self.reglas.obtener_todas().keys()
+            ),
         )
         self.bot = BotTelegram(configuracion, self.reglas, self.meta)
 

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import date, datetime
 import json
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -9,32 +10,72 @@ from src.config.settings import Configuracion
 from src.core.brain import MotorDecisiones
 from src.services.context_api import DatosContexto, GestorContexto
 from src.services.meta_api import ErrorMetaAds, GestorMetaAds
-from src.services.telegram_bot import NotificadorTelegram
 from src.services.telegram_bot import BotTelegram
 from src.config.reglas_negocio import GestorReglasNegocio
 
 
+REGLAS_ASADO = {
+    "activo": True,
+    "hora_activacion": "08:00",
+    "hora_desactivacion": "18:00",
+    "temperatura_minima": 20,
+    "temperatura_maxima": 30,
+    "lluvia_minima": 0,
+    "lluvia_maxima": 20,
+    "dias": {"L": True},
+}
+
+
 class TestMotorDecisiones(unittest.TestCase):
-    def test_lluvia_activa_estofado_y_pausa_asado(self) -> None:
-        acciones = MotorDecisiones().obtener_acciones(
-            DatosContexto(61, False, False)
+    def test_anuncio_sin_regla_no_genera_accion(self) -> None:
+        reglas = {"Asado": REGLAS_ASADO}
+        contexto = DatosContexto(10, False, False, temperatura=25)
+        acciones = MotorDecisiones().evaluar_anuncios(
+            [
+                {"name": "Asado", "id": "1", "status": "PAUSED"},
+                {"name": "Estofado", "id": "2", "status": "ACTIVE"},
+            ],
+            reglas,
+            contexto,
+            datetime(2026, 9, 7, 12, 0),
         )
         self.assertEqual(
             [(accion.nombre_campana, accion.accion) for accion in acciones],
-            [("Asado", "PAUSAR"), ("Estofado", "ACTIVAR")],
+            [("Asado", "ACTIVAR")],
         )
 
-    def test_fin_de_semana_aumenta_asado(self) -> None:
-        acciones = MotorDecisiones().obtener_acciones(
-            DatosContexto(0, True, False)
+    def test_clima_no_disponible_no_genera_acciones(self) -> None:
+        contexto = DatosContexto(0, False, False)
+        acciones = MotorDecisiones().evaluar_anuncios(
+            [{"name": "Asado", "id": "1", "status": "PAUSED"}],
+            {"Asado": REGLAS_ASADO},
+            contexto,
+            datetime(2026, 9, 7, 12, 0),
         )
-        self.assertEqual(acciones[1].factor_presupuesto, 1.3)
+        self.assertEqual(acciones, [])
 
-    def test_quincena_activa_economicos(self) -> None:
-        acciones = MotorDecisiones().obtener_acciones(
-            DatosContexto(0, False, True)
+    def test_no_genera_accion_si_estado_ya_coincide(self) -> None:
+        reglas = {"Asado": REGLAS_ASADO}
+        contexto = DatosContexto(10, False, False, temperatura=25)
+        motor = MotorDecisiones()
+        ahora = datetime(2026, 9, 7, 12, 0)
+        acciones = motor.evaluar_anuncios(
+            [{"name": "Asado", "id": "1", "status": "ACTIVE"}],
+            reglas,
+            contexto,
+            ahora,
         )
-        self.assertEqual(acciones[0].nombre_campana, "Económicos/Picada")
+        self.assertEqual(acciones, [])
+        acciones = motor.evaluar_anuncios(
+            [{"name": "Asado", "id": "1", "status": "PAUSED"}],
+            reglas,
+            contexto,
+            ahora,
+        )
+        self.assertEqual(
+            [(accion.nombre_campana, accion.accion, accion.identificador) for accion in acciones],
+            [("Asado", "ACTIVAR", "1")],
+        )
 
 
 class TestGestorContexto(unittest.TestCase):
@@ -60,45 +101,36 @@ class TestGestorContexto(unittest.TestCase):
 
 class TestIntegracionesSeguras(unittest.TestCase):
     def test_meta_simulada_no_requiere_credenciales(self) -> None:
-        gestor = GestorMetaAds(Configuracion(MODO_SIMULACION=True))
-        gestor.activar_campana("Asado")
-        gestor.modificar_presupuesto("Asado", 30)
+        gestor = GestorMetaAds(
+            Configuracion(MODO_SIMULACION=True),
+            nombres_adsets_simulados=lambda: ["Asado", "Estofado"],
+        )
+        gestor.activar_conjunto_por_nombre("asado")
+        conjuntos = gestor.obtener_conjuntos()
+        estados = {conjunto["name"]: conjunto["status"] for conjunto in conjuntos}
+        self.assertEqual(estados["Asado"], "ACTIVE")
+        self.assertEqual(estados["Estofado"], "PAUSED")
 
-    def test_telegram_desactivado_no_envia(self) -> None:
-        cliente = Mock()
-        notificador = NotificadorTelegram(
-            Configuracion(ENVIAR_TELEGRAM=False), cliente_http=cliente
-        )
-        self.assertIsNone(
-            notificador.enviar_reporte(DatosContexto(0, False, False), [])
-        )
+    def test_error_meta_no_se_confunde_con_lista_vacia(self) -> None:
+        gestor = GestorMetaAds(Configuracion(MODO_SIMULACION=False), cliente_api=Mock())
+        gestor._cuenta = None
+        with self.assertRaises(ErrorMetaAds):
+            gestor.obtener_conjuntos()
 
 
 class TestReglasDinamicas(unittest.TestCase):
-    def test_anuncio_sin_regla_se_pausa_y_regla_coincidente_se_activa(self) -> None:
-        reglas = {
-            "Asado": {
-                "activo": True,
-                "hora_activacion": "08:00",
-                "hora_desactivacion": "18:00",
-                "temperatura_minima": 20,
-                "temperatura_maxima": 30,
-                "lluvia_minima": 0,
-                "lluvia_maxima": 20,
-                "dias": {"L": True},
-            }
-        }
-        contexto = DatosContexto(10, False, False, temperatura=25)
-        acciones = MotorDecisiones().evaluar_anuncios(
-            [{"name": "Asado"}, {"name": "Estofado"}],
-            reglas,
-            contexto,
-            datetime(2026, 9, 7, 12, 0),
+    def test_simulacion_conjuntos_pausa_y_refleja_estado(self) -> None:
+        gestor = GestorMetaAds(
+            Configuracion(MODO_SIMULACION=True),
+            nombres_adsets_simulados=lambda: ["Asado"],
         )
-        self.assertEqual(
-            [(accion.nombre_campana, accion.accion) for accion in acciones],
-            [("Asado", "ACTIVAR"), ("Estofado", "PAUSAR")],
-        )
+        conjuntos = gestor.obtener_conjuntos()
+        self.assertEqual(conjuntos[0]["status"], "PAUSED")
+        self.assertTrue(conjuntos[0]["id"].startswith("simulado-"))
+        gestor.activar_conjunto(conjuntos[0]["id"], conjuntos[0]["name"])
+        self.assertEqual(gestor.obtener_conjuntos()[0]["status"], "ACTIVE")
+        gestor.pausar_conjunto_por_nombre("Asado")
+        self.assertEqual(gestor.obtener_conjuntos()[0]["status"], "PAUSED")
 
     def test_parser_con_punto_vacia_configuracion(self) -> None:
         texto = BotTelegram.PLANTILLA_CONFIGURACION.format(nombre="Asado").replace(
@@ -110,11 +142,18 @@ class TestReglasDinamicas(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directorio:
             gestor = GestorReglasNegocio(f"{directorio}/reglas.json")
             with open(f"{directorio}/reglas.json", "w", encoding="utf-8") as archivo:
-                archivo.write('{"anuncios": {}}')
+                archivo.write('{"conjuntos": {}}')
             gestor.guardar("Asado", {"activo": True})
             self.assertIsNotNone(gestor.obtener("ASADO"))
             gestor.vaciar("asado")
             self.assertIsNone(gestor.obtener("Asado"))
+
+    def test_gestor_reglas_crea_archivo_si_falta(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = f"{directorio}/reglas.json"
+            gestor = GestorReglasNegocio(ruta)
+            self.assertEqual(gestor.cargar(), {"conjuntos": {}})
+            self.assertTrue(Path(ruta).exists())
 
     def test_desactivar_conserva_configuracion_y_cambia_solo_estado(self) -> None:
         configuracion = {
@@ -130,24 +169,10 @@ class TestReglasDinamicas(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directorio:
             gestor = GestorReglasNegocio(f"{directorio}/reglas.json")
             with open(f"{directorio}/reglas.json", "w", encoding="utf-8") as archivo:
-                json.dump({"anuncios": {"Asado": configuracion}}, archivo)
+                json.dump({"conjuntos": {"Asado": configuracion}}, archivo)
             gestor.actualizar_estado("Asado", False)
             resultado = gestor.obtener("Asado")
         self.assertEqual(resultado, {**configuracion, "activo": False})
-
-    def test_meta_simulada_pausa_ad_y_no_campana(self) -> None:
-        gestor = GestorMetaAds(Configuracion(MODO_SIMULACION=True))
-        anuncio = gestor.obtener_anuncios()[0]
-        gestor.pausar_anuncio(anuncio["id"], anuncio["name"])
-        resultado = gestor.obtener_anuncios()[0]
-        self.assertEqual(resultado["status"], "PAUSED")
-        self.assertTrue(resultado["id"].startswith("simulado-"))
-
-    def test_error_meta_no_se_confunde_con_lista_vacia(self) -> None:
-        gestor = GestorMetaAds(Configuracion(MODO_SIMULACION=False), cliente_api=Mock())
-        gestor._cuenta = None
-        with self.assertRaises(ErrorMetaAds):
-            gestor.obtener_anuncios()
 
     def test_descubre_conjuntos_de_la_campana_principal(self) -> None:
         ajustes = Configuracion(
@@ -202,8 +227,8 @@ class TestReglasDinamicas(unittest.TestCase):
         orquestador.meta.obtener_conjuntos.side_effect = ErrorMetaAds("fallo")
         orquestador.bot.enviar_alerta = AsyncMock()
         asyncio.run(orquestador.evaluar_anuncios(None))
-        orquestador.meta.activar_anuncio.assert_not_called()
-        orquestador.meta.pausar_anuncio.assert_not_called()
+        orquestador.meta.activar_conjunto.assert_not_called()
+        orquestador.meta.pausar_conjunto.assert_not_called()
         orquestador.bot.enviar_alerta.assert_awaited_once_with("fallo")
 
     def test_estados_configuracion_distinguen_desactivado(self) -> None:
@@ -243,44 +268,28 @@ class TestReglasDinamicas(unittest.TestCase):
         self.assertFalse(autorizado)
         mensaje.reply_text.assert_awaited_once_with("Acceso denegado.")
 
-    def test_telegram_envia_reporte_con_cliente_simulado(self) -> None:
-        respuesta = Mock()
-        respuesta.json.return_value = {
-            "ok": True,
-            "result": {"message_id": 42},
-        }
-        cliente = Mock()
-        cliente.post.return_value = respuesta
-        notificador = NotificadorTelegram(
-            Configuracion(
-                ENVIAR_TELEGRAM=True,
-                TELEGRAM_BOT_TOKEN="token-prueba",
-                TELEGRAM_CHAT_ID="chat-prueba",
-            ),
-            cliente_http=cliente,
+    def test_reporte_diario_envia_mensaje(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123"))
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = None
+        bot._enviar_mensaje = AsyncMock()
+        contexto = DatosContexto(
+            30,
+            False,
+            False,
+            descripcion_clima="Despejado",
+            temperatura=25,
         )
-        resultado = notificador.enviar_reporte(
-            DatosContexto(0, False, False), []
-        )
-        self.assertEqual(resultado, 42)
-        cliente.post.assert_called_once()
-
-    def test_telegram_maneja_error_de_red(self) -> None:
-        import requests
-
-        cliente = Mock()
-        cliente.post.side_effect = requests.RequestException("fallo")
-        notificador = NotificadorTelegram(
-            Configuracion(
-                ENVIAR_TELEGRAM=True,
-                TELEGRAM_BOT_TOKEN="token-prueba",
-                TELEGRAM_CHAT_ID="chat-prueba",
-            ),
-            cliente_http=cliente,
-        )
-        self.assertIsNone(
-            notificador.enviar_reporte(DatosContexto(0, False, False), [])
-        )
+        anuncios = [
+            {"name": "Asado", "status": "ACTIVE"},
+            {"name": "Estofado", "status": "PAUSED"},
+        ]
+        asyncio.run(bot.enviar_reporte_diario(contexto, anuncios))
+        mensaje = bot._enviar_mensaje.call_args[0][0]
+        self.assertIn("Anuncios corriendo:", mensaje)
+        self.assertIn("- Asado", mensaje)
+        self.assertIn("Sin configurar:", mensaje)
+        self.assertIn("- Estofado", mensaje)
 
 
 if __name__ == "__main__":

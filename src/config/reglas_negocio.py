@@ -13,15 +13,18 @@ class GestorReglasNegocio:
     """Lee y actualiza las reglas de anuncios almacenadas en JSON."""
 
     def __init__(
-        self, ruta: str | Path | None = None, clave_principal: str = "anuncios"
+        self, ruta: str | Path | None = None, clave_principal: str = "conjuntos"
     ) -> None:
         self.ruta = Path(ruta) if ruta is not None else Path(__file__).with_name(
-            "reglas_negocio.json"
+            "reglas_conjuntos.json"
         )
         self.clave_principal = clave_principal
 
     def cargar(self) -> dict[str, Any]:
-        """Devuelve el documento JSON y falla si su estructura es inválida."""
+        """Devuelve el documento JSON y crea uno vacío si no existe."""
+        if not self.ruta.exists():
+            logger.warning("No existe el archivo de reglas; se crea '%s'", self.ruta)
+            self._guardar_documento({self.clave_principal: {}})
         try:
             with self.ruta.open("r", encoding="utf-8") as archivo:
                 datos = json.load(archivo)

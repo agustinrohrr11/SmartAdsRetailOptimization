@@ -5,97 +5,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from src.config.settings import Configuracion, configuracion
-from src.core.brain import AccionPublicitaria
-from src.services.context_api import DatosContexto
 from src.services.meta_api import ErrorMetaAds
 
 
 logger = logging.getLogger(__name__)
-
-
-class NotificadorTelegram:
-    """Envía reportes mediante la API HTTP de Telegram."""
-
-    LIMITE_MENSAJE = 4096
-
-    def __init__(
-        self,
-        ajustes: Configuracion = configuracion,
-        cliente_http: Any = requests,
-    ) -> None:
-        self.ajustes = ajustes
-        self.cliente_http = cliente_http
-        if ajustes.ENVIAR_TELEGRAM:
-            ajustes.validar_telegram()
-
-    def enviar_reporte(
-        self, contexto: DatosContexto, acciones: list[AccionPublicitaria]
-    ) -> int | None:
-        """Envía el reporte y devuelve el último identificador de mensaje."""
-        if not self.ajustes.ENVIAR_TELEGRAM:
-            logger.info("Telegram: envío desactivado")
-            return None
-
-        mensaje = self._formatear_mensaje(contexto, acciones)
-        ultimo_message_id: int | None = None
-        url = (
-            f"https://api.telegram.org/bot{self.ajustes.TELEGRAM_BOT_TOKEN}"
-            "/sendMessage"
-        )
-        try:
-            for inicio in range(0, len(mensaje), self.LIMITE_MENSAJE):
-                respuesta = self.cliente_http.post(
-                    url,
-                    json={
-                        "chat_id": self.ajustes.TELEGRAM_CHAT_ID,
-                        "text": mensaje[inicio:inicio + self.LIMITE_MENSAJE],
-                    },
-                    timeout=self.ajustes.TIMEOUT_RED,
-                )
-                respuesta.raise_for_status()
-                datos = respuesta.json()
-                message_id = datos.get("result", {}).get("message_id")
-                if datos.get("ok") is not True or not isinstance(message_id, int):
-                    logger.error("Telegram devolvió una respuesta inválida")
-                    return None
-                ultimo_message_id = message_id
-            logger.info("Reporte enviado por Telegram (message_id: %s)", ultimo_message_id)
-            return ultimo_message_id
-        except requests.exceptions.RequestException:
-            logger.error("Error de conexión al enviar el reporte por Telegram", exc_info=True)
-            return None
-        except (ValueError, TypeError, AttributeError, KeyError):
-            logger.error("Respuesta inválida de Telegram", exc_info=True)
-            return None
-
-    @staticmethod
-    def _formatear_mensaje(
-        contexto: DatosContexto, acciones: list[AccionPublicitaria]
-    ) -> str:
-        """Construye un reporte legible para Telegram."""
-        resumen = "\n".join(
-            f"• {accion.accion}: {accion.nombre_campana}"
-            + (
-                f" (presupuesto x{accion.factor_presupuesto:.1f})"
-                if accion.factor_presupuesto != 1.0
-                else ""
-            )
-            for accion in acciones
-        ) or "• No hubo cambios de campañas."
-        temperatura = (
-            f"\n🌡️ Temperatura máxima: {contexto.temperatura:.1f} °C"
-            if contexto.temperatura is not None
-            else ""
-        )
-        return (
-            "📊 Reporte Smart-Ads Retail\n\n"
-            f"🌦️ Clima: {contexto.descripcion_clima}{temperatura}\n"
-            f"🌧️ Probabilidad de lluvia: {contexto.probabilidad_lluvia:.0f}%\n\n"
-            f"✅ Acciones tomadas:\n{resumen}"
-        )
 
 
 class BotTelegram:
@@ -192,10 +106,18 @@ class BotTelegram:
             await actualizacion.message.reply_text("Uso: /adsconfig [nombre_anuncio]")
             return
         contexto.user_data["anuncio_configuracion"] = nombre
-        configuracion = self.reglas.obtener(nombre)
-        await actualizacion.message.reply_text(
-            self._formatear_plantilla(nombre, configuracion)
-        )
+        try:
+            configuracion = self.reglas.obtener(nombre)
+        except (OSError, ValueError, KeyError):
+            logger.exception("No se pudo leer la configuración de '%s'", nombre)
+            await actualizacion.message.reply_text(
+                "No se pudo leer la configuración. Volvé a intentar en unos minutos."
+            )
+            return
+        if actualizacion.message is not None:
+            await actualizacion.message.reply_text(
+                self._formatear_plantilla(nombre, configuracion)
+            )
 
     async def procesar_mensaje(self, actualizacion: Any, contexto: Any) -> None:
         """Procesa una plantilla rellenada y la guarda o desactiva."""
@@ -210,23 +132,31 @@ class BotTelegram:
                 "No pude interpretar la plantilla. Revisa el formato y vuelve a enviarla."
             )
             return
-        if configuracion == {}:
-            if self.reglas.obtener(nombre) is None:
+        try:
+            if configuracion == {}:
+                if self.reglas.obtener(nombre) is None:
+                    await actualizacion.message.reply_text(
+                        f"No existe una configuración guardada para '{nombre}' que conservar."
+                    )
+                    return
+                self.meta.pausar_conjunto_por_nombre(nombre)
+                self.reglas.actualizar_estado(nombre, False)
                 await actualizacion.message.reply_text(
-                    f"No existe una configuración guardada para '{nombre}' que conservar."
+                    f"La configuración de '{nombre}' se conservó, el conjunto quedó pausado "
+                    "y la campaña permanece activa."
                 )
-                return
-            self.reglas.actualizar_estado(nombre, False)
-            self.meta.pausar_conjunto_por_nombre(nombre)
-            await actualizacion.message.reply_text(
-                f"La configuración de '{nombre}' se conservó, el conjunto quedó pausado "
-                "y la campaña permanece activa."
-            )
-        else:
-            self.reglas.guardar(nombre, configuracion)
-            await actualizacion.message.reply_text(
-                f"Configuración de '{nombre}' guardada correctamente."
-            )
+            else:
+                self.reglas.guardar(nombre, configuracion)
+                await actualizacion.message.reply_text(
+                    f"Configuración de '{nombre}' guardada correctamente."
+                )
+        except (ErrorMetaAds, ValueError, KeyError, OSError):
+            logger.exception("No se pudo procesar la configuración de '%s'", nombre)
+            if actualizacion.message is not None:
+                await actualizacion.message.reply_text(
+                    "No se pudo guardar la configuración. Revisá los valores y volvé a intentarlo."
+                )
+            return
         contexto.user_data.pop("anuncio_configuracion", None)
 
     async def _exigir_chat_autorizado(self, actualizacion: Any) -> bool:
@@ -367,11 +297,6 @@ class BotTelegram:
             }
         except (TypeError, ValueError):
             return None
-
-    @staticmethod
-    def _esta_configurado(configuracion: dict[str, Any] | None) -> bool:
-        """Indica si la regla existe y no está explícitamente desactivada."""
-        return isinstance(configuracion, dict) and configuracion.get("activo") is True
 
     @staticmethod
     def _estado_configuracion(configuracion: dict[str, Any] | None) -> str:

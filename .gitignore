@@ -1,6 +1,9 @@
 # Secretos y configuración local
 .env
 
+# Estado de reglas generado en runtime
+src/config/reglas_conjuntos.json
+
 # Entornos virtuales
 .venv/
 venv/

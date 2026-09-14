@@ -1,7 +1,7 @@
 {
-  "anuncios": {
+  "conjuntos": {
     "asado": {
-      "activo": false,
+      "activo": true,
       "hora_activacion": "6:00",
       "hora_desactivacion": "19:00",
       "temperatura_minima": 0.0,

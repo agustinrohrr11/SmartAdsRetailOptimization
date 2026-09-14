@@ -17,7 +17,6 @@ class AccionPublicitaria:
 
 	nombre_anuncio: str
 	accion: str
-	factor_presupuesto: float = 1.0
 	identificador: str = ""
 
 	@property
@@ -63,34 +62,6 @@ class ConfiguracionAnuncio:
 class MotorDecisiones:
 	"""Evalúa el contexto y genera acciones publicitarias."""
 
-	def obtener_acciones(self, contexto: DatosContexto) -> list[AccionPublicitaria]:
-		"""Devuelve las acciones aplicables al contexto recibido."""
-		acciones: list[AccionPublicitaria] = []
-		llueve = contexto.probabilidad_lluvia > 60
-
-		if llueve:
-			acciones.extend(
-				[
-					AccionPublicitaria("Asado", "PAUSAR"),
-					AccionPublicitaria("Estofado", "ACTIVAR", 1.5),
-				]
-			)
-		elif contexto.es_fin_de_semana:
-			acciones.extend(
-				[
-					AccionPublicitaria("Asado", "ACTIVAR"),
-					AccionPublicitaria("Asado", "AUMENTAR_PRESUPUESTO", 1.3),
-				]
-			)
-
-		if contexto.es_quincena_o_fin_de_mes:
-			acciones.append(
-				AccionPublicitaria("Económicos/Picada", "ACTIVAR")
-			)
-
-		logger.info("Se generaron %d acciones publicitarias", len(acciones))
-		return acciones
-
 	def evaluar_anuncios(
 		self,
 		anuncios: list[dict[str, Any]],
@@ -100,10 +71,14 @@ class MotorDecisiones:
 	) -> list[AccionPublicitaria]:
 		"""Decide ACTIVAR o PAUSAR sin acceder a red ni modificar persistencia."""
 		ahora = momento or datetime.now()
+		if contexto.temperatura is None:
+			logger.warning("Clima no disponible; no se evalúa ningún anuncio")
+			return []
 		acciones: list[AccionPublicitaria] = []
 		for anuncio in anuncios:
 			nombre = str(anuncio.get("name", ""))
 			identificador = str(anuncio.get("id", ""))
+			estado_actual = str(anuncio.get("status", ""))
 			regla = next(
 				(
 					valor
@@ -118,13 +93,22 @@ class MotorDecisiones:
 				if isinstance(regla, dict)
 				else None
 			)
-			if configuracion is None or contexto.temperatura is None:
-				acciones.append(AccionPublicitaria(nombre, "PAUSAR", identificador=identificador))
+			if configuracion is None:
+				logger.info(
+					"Anuncio '%s' sin configuración válida; no se modifica su estado",
+					nombre,
+				)
 				continue
-			if self._coincide(configuracion, contexto, ahora):
-				acciones.append(AccionPublicitaria(nombre, "ACTIVAR", identificador=identificador))
-			else:
-				acciones.append(AccionPublicitaria(nombre, "PAUSAR", identificador=identificador))
+			estado_deseado = "ACTIVE" if self._coincide(configuracion, contexto, ahora) else "PAUSED"
+			if estado_actual == estado_deseado:
+				continue
+			acciones.append(
+				AccionPublicitaria(
+					nombre,
+					"ACTIVAR" if estado_deseado == "ACTIVE" else "PAUSAR",
+					identificador=identificador,
+				)
+			)
 		return acciones
 
 	@staticmethod
@@ -151,7 +135,3 @@ class MotorDecisiones:
 			and configuracion.temperatura_minima <= contexto.temperatura <= configuracion.temperatura_maxima
 			and configuracion.lluvia_minima <= contexto.probabilidad_lluvia <= configuracion.lluvia_maxima
 		)
-
-	def decidir(self, contexto: DatosContexto) -> list[AccionPublicitaria]:
-		"""Alias descriptivo para obtener las acciones del motor."""
-		return self.obtener_acciones(contexto)

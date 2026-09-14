@@ -31,11 +31,6 @@ class Configuracion:
 	META_ACCESS_TOKEN: str = field(default_factory=lambda: os.getenv("META_ACCESS_TOKEN", ""))
 	META_ACCOUNT_ID: str = field(default_factory=lambda: os.getenv("META_ACCOUNT_ID", ""))
 	META_CAMPAIGN_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ID", ""))
-	META_CAMPAIGN_ASADO_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ASADO_ID", ""))
-	META_CAMPAIGN_ESTOFADO_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ESTOFADO_ID", ""))
-	META_CAMPAIGN_ECONOMICOS_ID: str = field(default_factory=lambda: os.getenv("META_CAMPAIGN_ECONOMICOS_ID", ""))
-	META_MAX_BUDGET: float = field(default_factory=lambda: _obtener_float("META_MAX_BUDGET", 100000.0))
-	META_MAX_INCREASE_PERCENT: float = field(default_factory=lambda: _obtener_float("META_MAX_INCREASE_PERCENT", 50.0))
 	MODO_SIMULACION: bool = field(default_factory=lambda: _obtener_booleano("MODO_SIMULACION", True))
 
 	TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
@@ -52,15 +47,6 @@ class Configuracion:
 	TIMEOUT_RED: float = field(default_factory=lambda: _obtener_float("TIMEOUT_RED", 10.0))
 
 	@property
-	def campanas(self) -> dict[str, str]:
-		"""Devuelve las campañas autorizadas por nombre lógico."""
-		return {
-			"Asado": self.META_CAMPAIGN_ASADO_ID,
-			"Estofado": self.META_CAMPAIGN_ESTOFADO_ID,
-			"Económicos/Picada": self.META_CAMPAIGN_ECONOMICOS_ID,
-		}
-
-	@property
 	def identificador_cuenta_meta(self) -> str:
 		"""Devuelve el ID de cuenta en el formato requerido por Meta."""
 		identificador = self.META_ACCOUNT_ID.strip()
@@ -74,20 +60,6 @@ class Configuracion:
 				"META_ACCESS_TOKEN": self.META_ACCESS_TOKEN,
 				"META_ACCOUNT_ID": self.META_ACCOUNT_ID,
 				"META_CAMPAIGN_ID": self.META_CAMPAIGN_ID,
-			}.items()
-			if not valor
-		]
-		if faltantes:
-			raise ValueError("Falta configuración de Meta Ads: " + ", ".join(faltantes))
-
-	def validar_meta(self) -> None:
-		"""Valida la configuración necesaria para ejecutar Meta Ads realmente."""
-		faltantes = [
-			nombre
-			for nombre, valor in {
-				"META_ACCESS_TOKEN": self.META_ACCESS_TOKEN,
-				"META_ACCOUNT_ID": self.META_ACCOUNT_ID,
-				**{f"ID de campaña {nombre}": identificador for nombre, identificador in self.campanas.items()},
 			}.items()
 			if not valor
 		]
