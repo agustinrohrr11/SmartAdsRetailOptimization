@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time as modulo_tiempo
 from datetime import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 class OrquestadorAsincrono:
     """Coordina clima, reglas, Meta Ads y Telegram dentro de JobQueue."""
 
+    INTERVALO_ALERTA_FALLO: float = 3600
+
     def __init__(self) -> None:
         self.contexto = GestorContexto(configuracion)
         self.motor = MotorDecisiones()
@@ -36,17 +39,22 @@ class OrquestadorAsincrono:
                 self.reglas.obtener_todas().keys()
             ),
         )
-        self.bot = BotTelegram(configuracion, self.reglas, self.meta)
+        self.bot = BotTelegram(
+            configuracion, self.reglas, self.meta, self.evaluar_anuncios
+        )
+        self._ultima_alerta_fallo: dict[str, float] = {}
 
     async def evaluar_anuncios(self, contexto_job: Any) -> None:
         """Evalúa y aplica el estado de todos los anuncios."""
         datos_clima = self.contexto.obtener_contexto()
+        self.bot.ultimo_estado["clima"] = datos_clima
         try:
             anuncios = self.meta.obtener_conjuntos()
         except ErrorMetaAds as error:
             logger.exception("Se omite la evaluación por un error de Meta Ads")
             await self.bot.enviar_alerta(str(error))
             return
+        self.bot.ultimo_estado["anuncios"] = anuncios
         acciones = self.motor.evaluar_anuncios(anuncios, self.reglas.obtener_todas(), datos_clima)
         for accion in acciones:
             try:
@@ -55,10 +63,24 @@ class OrquestadorAsincrono:
                 else:
                     self.meta.pausar_conjunto(accion.identificador, accion.nombre_anuncio)
                 self._reflejar_estado_en_cache(anuncios, accion)
-            except (RuntimeError, ValueError):
+            except Exception as error:
                 logger.exception("No se pudo aplicar %s a '%s'", accion.accion, accion.nombre_anuncio)
-        self.bot.ultimo_estado["clima"] = datos_clima
-        self.bot.ultimo_estado["anuncios"] = anuncios
+                await self._alertar_fallo_meta(accion, error)
+
+    async def _alertar_fallo_meta(self, accion: Any, error: Exception) -> None:
+        """Alerta por Telegram el fallo de un adset, como máximo una vez por hora."""
+        clave = str(accion.identificador or accion.nombre_anuncio)
+        ahora = modulo_tiempo.time()
+        if ahora - self._ultima_alerta_fallo.get(clave, 0.0) < self.INTERVALO_ALERTA_FALLO:
+            return
+        self._ultima_alerta_fallo[clave] = ahora
+        verbo = "pausar" if accion.accion == "PAUSAR" else "activar"
+        detalle = " ".join(str(error).split())
+        if len(detalle) > 200:
+            detalle = detalle[:200] + "..."
+        await self.bot.enviar_alerta(
+            f"No se pudo {verbo} el anuncio '{accion.nombre_anuncio}'. Motivo: {detalle}"
+        )
 
     async def enviar_reporte(self, contexto_job: Any) -> None:
         """Envía el reporte con una lectura fresca de clima y Meta."""

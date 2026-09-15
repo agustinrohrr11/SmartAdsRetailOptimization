@@ -1,7 +1,7 @@
 """Motor de decisiones para la optimización de campañas."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 import logging
 from typing import Any
 
@@ -119,9 +119,11 @@ class MotorDecisiones:
 	) -> bool:
 		"""Comprueba todos los umbrales dinámicos de una regla."""
 		try:
-			hora_inicio = datetime.strptime(configuracion.hora_activacion, "%H:%M").time()
-			hora_fin = datetime.strptime(configuracion.hora_desactivacion, "%H:%M").time()
-		except ValueError:
+			horas, minutos = configuracion.hora_activacion.split(":")
+			hora_inicio = time(int(horas), int(minutos))
+			horas, minutos = configuracion.hora_desactivacion.split(":")
+			hora_fin = time(int(horas), int(minutos))
+		except (ValueError, TypeError):
 			return False
 		en_horario = (
 			hora_inicio <= momento.time() <= hora_fin

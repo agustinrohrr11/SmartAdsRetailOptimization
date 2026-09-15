@@ -140,5 +140,32 @@ class GestorMetaAds:
 		from facebook_business.adobjects.adset import AdSet
 
 		conjunto = AdSet(identificador)
-		conjunto.api_update(params={"status": estado})
+		try:
+			conjunto.api_update(params={"status": estado})
+		except Exception as error:
+			logger.exception(
+				"Meta rechazó la actualización de '%s' a %s", nombre, estado
+			)
+			raise ErrorMetaAds(
+				self._mensaje_error_meta(error, nombre, estado)
+			) from error
 		logger.info("Meta Ads: conjunto '%s' actualizado a %s; campaña intacta", nombre, estado)
+
+	@staticmethod
+	def _mensaje_error_meta(error: Exception, nombre: str, estado: str) -> str:
+		"""Extrae el motivo amigable de un fallo de la API de Meta."""
+		detalle = None
+		funcion = getattr(error, "api_error_message", None)
+		if callable(funcion):
+			try:
+				detalle = str(funcion())
+			except Exception:
+				detalle = None
+		if not detalle:
+			detalle = str(error)
+		if len(detalle) > 200:
+			detalle = detalle[:200] + "..."
+		return (
+			f"No se pudo actualizar el conjunto "
+			f"'{nombre or 'sin nombre'}' a {estado}: {detalle}"
+		)

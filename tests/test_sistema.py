@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from src.config.settings import Configuracion
-from src.core.brain import MotorDecisiones
+from src.core.brain import AccionPublicitaria, ConfiguracionAnuncio, MotorDecisiones
 from src.services.context_api import DatosContexto, GestorContexto
 from src.services.meta_api import ErrorMetaAds, GestorMetaAds
 from src.services.telegram_bot import BotTelegram
@@ -214,6 +214,72 @@ class TestReglasDinamicas(unittest.TestCase):
             gestor.pausar_conjunto("conjunto-1", "Asado")
         conjunto.api_update.assert_called_once_with(params={"status": "PAUSED"})
 
+    def test_error_real_meta_se_envuelve_en_error_meta_ads(self) -> None:
+        class FalsoErrorMeta(Exception):
+            def api_error_message(self) -> str:
+                return "falta el permiso ads_management"
+
+        ajustes = Configuracion(
+            META_ACCESS_TOKEN="token-prueba",
+            META_ACCOUNT_ID="cuenta-prueba",
+            META_CAMPAIGN_ID="campana-prueba",
+            MODO_SIMULACION=False,
+        )
+        gestor = GestorMetaAds(ajustes, cliente_api=Mock())
+        conjunto = Mock()
+        conjunto.api_update.side_effect = FalsoErrorMeta()
+        with patch(
+            "facebook_business.adobjects.adset.AdSet",
+            return_value=conjunto,
+        ):
+            with self.assertRaises(ErrorMetaAds) as contexto_error:
+                gestor.pausar_conjunto("conjunto-1", "Asado")
+        self.assertIn(
+            "falta el permiso ads_management", str(contexto_error.exception)
+        )
+
+    def test_desactivar_con_meta_fallido_responde_y_no_guarda(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = {"activo": True}
+        bot.meta = Mock()
+        bot.meta.pausar_conjunto_por_nombre.side_effect = ErrorMetaAds(
+            "No se pudo actualizar el conjunto 'estofado' a PAUSED: falta permiso"
+        )
+        mensaje = Mock()
+        mensaje.text = "Desactivar anuncio: [.]"
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(
+            effective_chat=Mock(id=123), message=mensaje
+        )
+        contexto = Mock(user_data={"anuncio_configuracion": "estofado"})
+        asyncio.run(bot.procesar_mensaje(actualizacion, contexto))
+        bot.meta.pausar_conjunto_por_nombre.assert_called_once_with("estofado")
+        bot.reglas.actualizar_estado.assert_not_called()
+        bot.reglas.guardar.assert_not_called()
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("Meta rechazó la operación", respuesta)
+        self.assertEqual(contexto.user_data["anuncio_configuracion"], "estofado")
+
+    def test_desactivar_con_meta_ok_guarda_regla_y_responde(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = {"activo": True}
+        bot.meta = Mock()
+        mensaje = Mock()
+        mensaje.text = "Desactivar anuncio: [.]"
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(
+            effective_chat=Mock(id=123), message=mensaje
+        )
+        contexto = Mock(user_data={"anuncio_configuracion": "estofado"})
+        asyncio.run(bot.procesar_mensaje(actualizacion, contexto))
+        bot.meta.pausar_conjunto_por_nombre.assert_called_once_with("estofado")
+        bot.reglas.actualizar_estado.assert_called_once_with("estofado", False)
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("se conservó", respuesta)
+        self.assertNotIn("anuncio_configuracion", contexto.user_data)
+
     def test_evaluador_no_modifica_anuncios_si_meta_falla(self) -> None:
         from main import OrquestadorAsincrono
 
@@ -230,6 +296,76 @@ class TestReglasDinamicas(unittest.TestCase):
         orquestador.meta.activar_conjunto.assert_not_called()
         orquestador.meta.pausar_conjunto.assert_not_called()
         orquestador.bot.enviar_alerta.assert_awaited_once_with("fallo")
+
+    def test_cache_lleno_con_anuncios_real_aunque_una_accion_falle(self) -> None:
+        from main import OrquestadorAsincrono
+
+        orquestador = OrquestadorAsincrono()
+        orquestador.contexto = Mock(
+            obtener_contexto=Mock(
+                return_value=DatosContexto(
+                    30, False, False, descripcion_clima="Despejado", temperatura=25
+                )
+            )
+        )
+        anuncios = [{"id": "a1", "name": "Asado", "status": "PAUSED"}]
+        orquestador.meta = Mock()
+        orquestador.meta.obtener_conjuntos.return_value = anuncios
+        orquestador.meta.activar_conjunto.side_effect = RuntimeError("fallo real")
+        orquestador.bot.enviar_alerta = AsyncMock()
+        orquestador.motor.evaluar_anuncios = Mock(
+            return_value=[
+                AccionPublicitaria("Asado", "ACTIVAR", identificador="a1")
+            ]
+        )
+        asyncio.run(orquestador.evaluar_anuncios(None))
+        self.assertEqual(
+            orquestador.bot.ultimo_estado["clima"].descripcion_clima, "Despejado"
+        )
+        self.assertEqual(
+            orquestador.bot.ultimo_estado["anuncios"][0]["name"], "Asado"
+        )
+        orquestador.bot.enviar_alerta.assert_awaited_once()
+        contenido = orquestador.bot.enviar_alerta.call_args[0][0]
+        self.assertIn("Asado", contenido)
+
+    def test_cooldown_alertas_solo_alarma_una_vez_por_hora_por_adset(self) -> None:
+        from main import OrquestadorAsincrono
+
+        orquestador = OrquestadorAsincrono()
+        orquestador.bot.enviar_alerta = AsyncMock()
+        asyncio.run(
+            orquestador._alertar_fallo_meta(
+                AccionPublicitaria("Asado", "PAUSAR", identificador="a1"),
+                RuntimeError("primer fallo"),
+            )
+        )
+        asyncio.run(
+            orquestador._alertar_fallo_meta(
+                AccionPublicitaria("Asado", "PAUSAR", identificador="a1"),
+                RuntimeError("segundo fallo"),
+            )
+        )
+        self.assertEqual(orquestador.bot.enviar_alerta.await_count, 1)
+
+    def test_alerta_sin_cooldown_para_otro_adset(self) -> None:
+        from main import OrquestadorAsincrono
+
+        orquestador = OrquestadorAsincrono()
+        orquestador.bot.enviar_alerta = AsyncMock()
+        asyncio.run(
+            orquestador._alertar_fallo_meta(
+                AccionPublicitaria("Asado", "PAUSAR", identificador="a1"),
+                RuntimeError("primero"),
+            )
+        )
+        asyncio.run(
+            orquestador._alertar_fallo_meta(
+                AccionPublicitaria("Estofado", "PAUSAR", identificador="a2"),
+                RuntimeError("segundo"),
+            )
+        )
+        self.assertEqual(orquestador.bot.enviar_alerta.await_count, 2)
 
     def test_estados_configuracion_distinguen_desactivado(self) -> None:
         self.assertEqual(
@@ -257,7 +393,77 @@ class TestReglasDinamicas(unittest.TestCase):
         self.assertIn("Activación: [6:00]", plantilla)
         self.assertIn("Desactivación: [19:00]", plantilla)
         self.assertIn("Desactivar anuncio: [.]", plantilla)
-        self.assertIn("L[], MA[.]", plantilla)
+        self.assertIn("L[.], MA[]", plantilla)
+
+    def test_parser_dia_con_punto_queda_activo(self) -> None:
+        configuracion = {
+            "activo": True,
+            "hora_activacion": "06:00",
+            "hora_desactivacion": "19:00",
+            "temperatura_minima": 0.0,
+            "temperatura_maxima": 50.0,
+            "lluvia_minima": 0.0,
+            "lluvia_maxima": 60.0,
+            "dias": {"L": False, "MA": False, "J": False, "S": False},
+        }
+        plantilla = BotTelegram._formatear_plantilla("Asado", configuracion)
+        plantilla = plantilla.replace("+ Dias de la semana: L[]", "+ Dias de la semana: L[.]")
+        plantilla = plantilla.replace("S[], D[]", "S[.], D[]")
+        reparsed = BotTelegram._parsear_plantilla(plantilla, "Asado")
+        self.assertIsNotNone(reparsed)
+        self.assertTrue(reparsed["dias"]["L"])
+        self.assertFalse(reparsed["dias"]["MA"])
+        self.assertFalse(reparsed["dias"]["J"])
+        self.assertTrue(reparsed["dias"]["S"])
+
+    def test_formatear_y_parsear_dias_son_consistentes(self) -> None:
+        configuracion = {
+            "activo": True,
+            "hora_activacion": "6:00",
+            "hora_desactivacion": "19:00",
+            "temperatura_minima": 0.0,
+            "temperatura_maxima": 50.0,
+            "lluvia_minima": 0.0,
+            "lluvia_maxima": 60.0,
+            "dias": {"L": True, "MA": False, "MI": True, "J": False, "V": True},
+        }
+        plantilla = BotTelegram._formatear_plantilla("estofado", configuracion)
+        reparsed = BotTelegram._parsear_plantilla(plantilla, "estofado")
+        self.assertEqual(
+            {dia: reparsed["dias"][dia] for dia in configuracion["dias"]},
+            configuracion["dias"],
+        )
+
+    def test_hora_sin_cero_inicial_hace_coincidir(self) -> None:
+        motor = MotorDecisiones()
+        configuracion = ConfiguracionAnuncio(
+            nombre="asado",
+            hora_activacion="6:00",
+            hora_desactivacion="19:00",
+            temperatura_minima=0.0,
+            temperatura_maxima=50.0,
+            lluvia_minima=0.0,
+            lluvia_maxima=100.0,
+            dias={"L": True, "MA": True, "MI": True, "J": True, "V": True, "S": True, "D": True},
+        )
+        contexto = DatosContexto(30, False, False, descripcion_clima="Despejado", temperatura=25)
+        momento = datetime(2026, 9, 15, 12, 0)
+        self.assertTrue(motor._coincide(configuracion, contexto, momento))
+
+    def test_hora_invalida_queda_fuera_de_horario(self) -> None:
+        motor = MotorDecisiones()
+        configuracion = ConfiguracionAnuncio(
+            nombre="asado",
+            hora_activacion="--:--",
+            hora_desactivacion="19:00",
+            temperatura_minima=0.0,
+            temperatura_maxima=50.0,
+            lluvia_minima=0.0,
+            lluvia_maxima=100.0,
+            dias={"L": True},
+        )
+        contexto = DatosContexto(30, False, False, descripcion_clima="Despejado", temperatura=25)
+        self.assertFalse(motor._coincide(configuracion, contexto, datetime(2026, 9, 15, 12, 0)))
 
     def test_chat_no_autorizado_recibe_denegacion(self) -> None:
         bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
@@ -346,6 +552,87 @@ class TestReglasDinamicas(unittest.TestCase):
         asyncio.run(bot.adsinfo(actualizacion, Mock(job_queue=job_queue)))
         respuesta = mensaje.reply_text.call_args[0][0]
         self.assertIn("aproximadamente 16 minutos", respuesta)
+
+    def test_calcular_proxima_lectura_redondea_menos_de_un_minuto(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        job_queue = Mock()
+        job = Mock()
+        job.name = "evaluar_anuncios"
+        job.next_t = datetime.now(timezone.utc) + timedelta(seconds=40)
+        job_queue.jobs.return_value = [job]
+        minutos = bot._calcular_proxima_lectura(Mock(job_queue=job_queue))
+        self.assertEqual(minutos, 1)
+
+    def test_adsinfo_sin_datos_con_proxima_lectura_subminuto(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        job_queue = Mock()
+        job = Mock()
+        job.name = "evaluar_anuncios"
+        job.next_t = datetime.now(timezone.utc) + timedelta(seconds=40)
+        job_queue.jobs.return_value = [job]
+        asyncio.run(bot.adsinfo(actualizacion, Mock(job_queue=job_queue)))
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("aproximadamente 1 minuto.", respuesta)
+
+    def test_medir_ejecuta_medicion_y_responde_reporte(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.reglas = Mock()
+        bot.reglas.obtener.return_value = None
+
+        async def medir(contexto) -> None:
+            bot.ultimo_estado["clima"] = DatosContexto(
+                30, False, False, descripcion_clima="Despejado", temperatura=25
+            )
+            bot.ultimo_estado["anuncios"] = [
+                {"name": "Asado", "status": "ACTIVE"}
+            ]
+
+        bot.funcion_medicion = medir
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        asyncio.run(bot.medir(actualizacion, Mock()))
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("Despejado", respuesta)
+        self.assertIn("- Asado", respuesta)
+
+    def test_medir_sin_medicion_previa_responde_aviso(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+
+        async def medir(contexto) -> None:
+            pass
+
+        bot.funcion_medicion = medir
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        asyncio.run(bot.medir(actualizacion, Mock()))
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("aún no hay datos disponibles", respuesta)
+
+    def test_medir_chat_no_autorizado_no_ejecuta_medicion(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        funcion = AsyncMock()
+        bot.funcion_medicion = funcion
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=999), message=mensaje)
+        asyncio.run(bot.medir(actualizacion, Mock()))
+        funcion.assert_not_called()
+        mensaje.reply_text.assert_awaited_once_with("Acceso denegado.")
+
+    def test_medir_sin_funcion_configurada_responde_aviso(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        mensaje = Mock()
+        mensaje.reply_text = AsyncMock()
+        actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+        asyncio.run(bot.medir(actualizacion, Mock()))
+        respuesta = mensaje.reply_text.call_args[0][0]
+        self.assertIn("no está configurada", respuesta)
 
 
 if __name__ == "__main__":

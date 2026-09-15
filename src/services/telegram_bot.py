@@ -31,6 +31,7 @@ class BotTelegram:
         ajustes: Configuracion = configuracion,
         reglas: Any = None,
         meta: Any = None,
+        funcion_medicion: Any = None,
     ) -> None:
         from src.config.reglas_negocio import GestorReglasNegocio
 
@@ -40,6 +41,7 @@ class BotTelegram:
             clave_principal="conjuntos",
         )
         self.meta = meta
+        self.funcion_medicion = funcion_medicion
         self.ultimo_estado: dict[str, Any] = {"clima": None, "anuncios": []}
         if self.ajustes.ENVIAR_TELEGRAM:
             self.ajustes.validar_telegram()
@@ -64,6 +66,7 @@ class BotTelegram:
         aplicacion.add_handler(CommandHandler("ads", self.ads))
         aplicacion.add_handler(CommandHandler("adsconfig", self.ads_config))
         aplicacion.add_handler(CommandHandler("adsinfo", self.adsinfo))
+        aplicacion.add_handler(CommandHandler("medir", self.medir))
         aplicacion.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.procesar_mensaje)
         )
@@ -77,7 +80,8 @@ class BotTelegram:
             "/comandos - Lista los comandos disponibles.\n"
             "/ads - Lista anuncios y su configuración.\n"
             "/adsconfig [nombre_anuncio] - Muestra la plantilla de configuración.\n"
-            "/adsinfo - Muestra el reporte actual con clima y estado de anuncios."
+            "/adsinfo - Muestra el reporte actual con clima y estado de anuncios.\n"
+            "/medir - Fuerza una medición completa ahora."
         )
 
     async def ads(self, actualizacion: Any, contexto: Any) -> None:
@@ -114,7 +118,10 @@ class BotTelegram:
             texto_aviso = "Aún no hay datos disponibles."
             minutos = self._calcular_proxima_lectura(contexto)
             if minutos is not None:
-                texto_aviso += f"\nLa próxima lectura será en aproximadamente {minutos} minutos."
+                texto_aviso += (
+                    f"\nLa próxima lectura será en aproximadamente "
+                    f"{minutos} minuto{'s' if minutos != 1 else ''}."
+                )
             else:
                 texto_aviso += "\nEl próximo ciclo ocurrirá en breve."
             await actualizacion.message.reply_text(texto_aviso)
@@ -122,6 +129,36 @@ class BotTelegram:
         await actualizacion.message.reply_text(
             self._construir_reporte(clima, anuncios)
         )
+
+    async def medir(self, actualizacion: Any, contexto: Any) -> None:
+        """Fuerza una medición completa ahora y responde el reporte fresco."""
+        if not await self._exigir_chat_autorizado(actualizacion):
+            return
+        mensaje = getattr(actualizacion, "message", None)
+        if mensaje is None:
+            return
+        if self.funcion_medicion is None:
+            await mensaje.reply_text(
+                "La medición forzada no está configurada en este bot."
+            )
+            return
+        try:
+            await self.funcion_medicion(contexto)
+        except Exception:
+            logger.exception("No se pudo completar la medición forzada")
+            await mensaje.reply_text(
+                "No se pudo completar la medición. Revisá los logs."
+            )
+            return
+        clima = self.ultimo_estado["clima"]
+        anuncios = self.ultimo_estado["anuncios"]
+        if clima is None or not anuncios:
+            await mensaje.reply_text(
+                "Medición realizada, pero aún no hay datos disponibles.\n"
+                "El próximo ciclo ocurrirá en breve."
+            )
+            return
+        await mensaje.reply_text(self._construir_reporte(clima, anuncios))
 
     async def ads_config(self, actualizacion: Any, contexto: Any) -> None:
         """Entrega la plantilla y recuerda el anuncio a configurar."""
@@ -179,12 +216,18 @@ class BotTelegram:
                 await actualizacion.message.reply_text(
                     f"Configuración de '{nombre}' guardada correctamente."
                 )
-        except (ErrorMetaAds, ValueError, KeyError, OSError):
+        except (ErrorMetaAds, ValueError, KeyError, OSError) as error:
             logger.exception("No se pudo procesar la configuración de '%s'", nombre)
             if actualizacion.message is not None:
-                await actualizacion.message.reply_text(
-                    "No se pudo guardar la configuración. Revisá los valores y volvé a intentarlo."
-                )
+                if isinstance(error, ErrorMetaAds):
+                    await actualizacion.message.reply_text(
+                        "Meta rechazó la operación, no se guardó ningún cambio.\n"
+                        + str(error)
+                    )
+                else:
+                    await actualizacion.message.reply_text(
+                        "No se pudo guardar la configuración. Revisá los valores y volvé a intentarlo."
+                    )
             return
         contexto.user_data.pop("anuncio_configuracion", None)
 
@@ -215,7 +258,7 @@ class BotTelegram:
 
         dias = configuracion.get("dias", {})
         valores_dias = {
-            dia: ("" if dias.get(dia, False) else ".")
+            dia: ("." if dias.get(dia, False) else "")
             for dia in ("L", "MA", "MI", "J", "V", "S", "D")
         }
         desactivar = "." if configuracion.get("activo") is False else ""
@@ -299,7 +342,7 @@ class BotTelegram:
 
     @classmethod
     def _calcular_proxima_lectura(cls, contexto: Any) -> int | None:
-        """Devuelve los minutos hasta la próxima lectura de datos."""
+        """Devuelve los minutos hasta la próxima lectura, o None si no se puede saber."""
         job_queue = getattr(contexto, "job_queue", None)
         if job_queue is None:
             return None
@@ -314,10 +357,12 @@ class BotTelegram:
             return None
         diff = min(proximas) - ahora
         total_segundos = max(diff.total_seconds(), 0)
+        if total_segundos <= 0:
+            return None
         minutos = int(total_segundos // 60)
         if total_segundos % 60 > 30:
             minutos += 1
-        return minutos if minutos > 0 else None
+        return minutos if minutos > 0 else 1
 
     @classmethod
     def _parsear_plantilla(cls, texto: str, nombre: str) -> dict[str, Any] | None:
@@ -344,7 +389,7 @@ class BotTelegram:
             valor = campo(rf"\b{dia}\s*\[([^]]*)\]")
             if valor is None:
                 return None
-            dias[dia] = valor != "."
+            dias[dia] = valor == "."
         if all(not valor for valor in valores.values()) and not any(dias.values()):
             return {}
         if any(valor in (None, "") for valor in valores.values()):
