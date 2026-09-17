@@ -47,6 +47,7 @@ class GestorContexto:
 				params={
 					"latitude": self.ajustes.LATITUD,
 					"longitude": self.ajustes.LONGITUD,
+					"current": "temperature_2m,weather_code,precipitation_probability",
 					"daily": "precipitation_probability_max,weather_code,temperature_2m_max",
 					"timezone": "auto",
 					"forecast_days": 1,
@@ -66,15 +67,19 @@ class GestorContexto:
 			)
 
 	def _extraer_clima(self, datos: dict[str, Any]) -> dict[str, float | str | None]:
-		"""Extrae el primer pronóstico diario de la respuesta de Open-Meteo."""
+		"""Extrae las condiciones actuales, con respaldo del pronóstico diario."""
 		diario = datos["daily"]
-		probabilidad = float(diario["precipitation_probability_max"][0])
-		codigo = int(diario["weather_code"][0])
-		temperatura = float(diario["temperature_2m_max"][0])
+		actual = datos.get("current")
+		if isinstance(actual, dict) and "temperature_2m" in actual:
+			return {
+				"probabilidad_lluvia": float(actual["precipitation_probability"]),
+				"descripcion_clima": self._describir_clima(int(actual["weather_code"])),
+				"temperatura": float(actual["temperature_2m"]),
+			}
 		return {
-			"probabilidad_lluvia": probabilidad,
-			"descripcion_clima": self._describir_clima(codigo),
-			"temperatura": temperatura,
+			"probabilidad_lluvia": float(diario["precipitation_probability_max"][0]),
+			"descripcion_clima": self._describir_clima(int(diario["weather_code"][0])),
+			"temperatura": float(diario["temperature_2m_max"][0]),
 		}
 
 	def _crear_contexto(

@@ -48,6 +48,11 @@ class Configuracion:
 		)
 	)
 	TIMEOUT_RED: float = field(default_factory=lambda: _obtener_float("TIMEOUT_RED", 10.0))
+	ZONA_HORARIA: str = field(
+		default_factory=lambda: os.getenv(
+			"ZONA_HORARIA", "America/Argentina/Buenos_Aires"
+		)
+	)
 
 	@property
 	def identificador_cuenta_meta(self) -> str:

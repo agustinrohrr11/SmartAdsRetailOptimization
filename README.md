@@ -41,6 +41,7 @@ Sistema automatizado para gestionar campañas de Meta Ads (Facebook/Instagram) e
    | `META_ACCOUNT_ID`    | ID de la cuenta publicitaria (con o sin `act_`)    |
    | `META_CAMPAIGN_ID`   | ID de la campaña a administrar                    |
    | `LATITUD` / `LONGITUD` | Coordenadas de la sucursal para el clima        |
+   | `ZONA_HORARIA` | Zona horaria de los reportes (tz de IANA)           |
    | `TELEGRAM_BOT_TOKEN` | Token del bot de Telegram                         |
    | `TELEGRAM_CHAT_ID`   | ID(s) de chat autorizado(s), separados por coma   |
    | `MODO_SIMULACION`    | `true` = no toca Meta (simula acciones)           |
@@ -54,8 +55,9 @@ Sistema automatizado para gestionar campañas de Meta Ads (Facebook/Instagram) e
 
 ## Uso rápido
 
-- El bot evalúa las reglas cada 30 minutos y manda reportes diarios a las 06:00 y 15:00.
-- Comandos de Telegram: `/comandos`, `/ads`, `/adsconfig <nombre>`, `/adsinfo`, `/medir`.
+- El bot evalúa las reglas cada 30 minutos y manda reportes diarios en los horarios configurados (por defecto 06:00 y 15:00, hora local según `ZONA_HORARIA`).
+- El reporte muestra la temperatura, la probabilidad de lluvia y el estado del cielo **actuales** del punto definido por `LATITUD`/`LONGITUD` (datos de Open-Meteo), no el pronóstico máximo del día.
+- Comandos de Telegram: `/comandos`, `/ads`, `/adsconfig <nombre>`, `/adsinfo`, `/medir`, `/reportes`, `/setreporte HH:MM`, `/delreporte HH:MM`. Los horarios de reporte se pueden modificar en caliente y quedan guardados.
 - Para probar sin tocar Meta de verdad, usar `MODO_SIMULACION="true"`.
 - Ejecutar los tests:
 

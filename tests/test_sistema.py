@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from src.config.settings import Configuracion
+from src.config.gestor_reportes import GestorReportes
 from src.core.brain import AccionPublicitaria, ConfiguracionAnuncio, MotorDecisiones
 from src.services.context_api import DatosContexto, GestorContexto
 from src.services.meta_api import ErrorMetaAds, GestorMetaAds
@@ -79,7 +80,33 @@ class TestMotorDecisiones(unittest.TestCase):
 
 
 class TestGestorContexto(unittest.TestCase):
-    def test_parsea_open_meteo_y_ultimo_dia_del_mes(self) -> None:
+    def test_parsea_condiciones_actuales_y_ultimo_dia_del_mes(self) -> None:
+        respuesta = Mock()
+        respuesta.json.return_value = {
+            "current": {
+                "temperature_2m": 16.2,
+                "weather_code": 1,
+                "precipitation_probability": 0,
+            },
+            "daily": {
+                "precipitation_probability_max": [70],
+                "weather_code": [61],
+                "temperature_2m_max": [20],
+            },
+        }
+        cliente = Mock()
+        cliente.get.return_value = respuesta
+        contexto = GestorContexto(
+            cliente_http=cliente,
+            fecha_actual=date(2026, 2, 28),
+        ).obtener_contexto()
+        self.assertEqual(contexto.temperatura, 16.2)
+        self.assertEqual(contexto.probabilidad_lluvia, 0)
+        self.assertEqual(contexto.descripcion_clima, "Parcialmente nublado")
+        self.assertTrue(contexto.es_quincena_o_fin_de_mes)
+        cliente.get.assert_called_once()
+
+    def test_sin_bloque_current_usa_pronostico_diario(self) -> None:
         respuesta = Mock()
         respuesta.json.return_value = {
             "daily": {
@@ -94,9 +121,9 @@ class TestGestorContexto(unittest.TestCase):
             cliente_http=cliente,
             fecha_actual=date(2026, 2, 28),
         ).obtener_contexto()
+        self.assertEqual(contexto.temperatura, 20)
         self.assertEqual(contexto.probabilidad_lluvia, 70)
-        self.assertTrue(contexto.es_quincena_o_fin_de_mes)
-        cliente.get.assert_called_once()
+        self.assertEqual(contexto.descripcion_clima, "Lluvia")
 
 
 class TestIntegracionesSeguras(unittest.TestCase):
@@ -633,6 +660,196 @@ class TestReglasDinamicas(unittest.TestCase):
         asyncio.run(bot.medir(actualizacion, Mock()))
         respuesta = mensaje.reply_text.call_args[0][0]
         self.assertIn("no está configurada", respuesta)
+
+
+class TestGestorReportes(unittest.TestCase):
+    def test_crea_archivo_con_valores_por_defecto_si_falta(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = f"{directorio}/horarios.json"
+            gestor = GestorReportes(ruta)
+            self.assertEqual(gestor.listar(), ["06:00", "15:00"])
+            self.assertTrue(Path(ruta).exists())
+
+    def test_normaliza_y_agrega_horario(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            gestor = GestorReportes(f"{directorio}/horarios.json")
+            self.assertEqual(GestorReportes._normalizar("6"), "06:00")
+            self.assertEqual(GestorReportes._normalizar("6:30"), "06:30")
+            self.assertEqual(GestorReportes._normalizar("06:30"), "06:30")
+            ok, mensaje = gestor.agregar("6:30")
+            self.assertTrue(ok)
+            self.assertIn("06:30", mensaje)
+            self.assertEqual(gestor.listar(), ["06:00", "06:30", "15:00"])
+
+    def test_rechaza_horarios_invalidos(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            gestor = GestorReportes(f"{directorio}/horarios.json")
+            for invalido in ("24:00", "6:99", "10:00 pm", "abc", ""):
+                ok, mensaje = gestor.agregar(invalido)
+                self.assertFalse(ok, f"debió rechazar {invalido!r}")
+                self.assertIn("inválido", mensaje)
+
+    def test_no_duplica_ni_elimina_inexistente(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            gestor = GestorReportes(f"{directorio}/horarios.json")
+            ok, mensaje = gestor.agregar("06:00")
+            self.assertFalse(ok)
+            self.assertIn("Ya existe", mensaje)
+            ok, mensaje = gestor.eliminar("09:00")
+            self.assertFalse(ok)
+            self.assertIn("No existe", mensaje)
+
+    def test_elimina_horario(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            gestor = GestorReportes(f"{directorio}/horarios.json")
+            ok, mensaje = gestor.eliminar("15:00")
+            self.assertTrue(ok)
+            self.assertEqual(gestor.listar(), ["06:00"])
+            gestor.eliminar("06:00")
+            self.assertEqual(gestor.listar(), [])
+
+
+class TestComandosReportes(unittest.TestCase):
+    def _bot_con_gestor_temp(self, directorio: str) -> BotTelegram:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        bot.gestor_reportes = GestorReportes(f"{directorio}/horarios.json")
+        bot.funcion_reporte = Mock()
+        return bot
+
+    def test_reportes_lista_horarios_guardados(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = self._bot_con_gestor_temp(directorio)
+            mensaje = Mock()
+            mensaje.reply_text = AsyncMock()
+            actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+            asyncio.run(bot.reportes(actualizacion, Mock()))
+            respuesta = mensaje.reply_text.call_args[0][0]
+            self.assertIn("06:00", respuesta)
+            self.assertIn("15:00", respuesta)
+
+    def test_setreporte_agrega_y_reprograma(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = self._bot_con_gestor_temp(directorio)
+            mensaje = Mock()
+            mensaje.text = "/setreporte 6:30"
+            mensaje.reply_text = AsyncMock()
+            actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+            cola = Mock()
+            cola.jobs.return_value = []
+            contexto = Mock(job_queue=cola)
+            asyncio.run(bot.setreporte(actualizacion, contexto))
+            self.assertEqual(bot.gestor_reportes.listar(), ["06:00", "06:30", "15:00"])
+            self.assertIn("06:30", mensaje.reply_text.call_args[0][0])
+            cola.run_daily.assert_called()
+
+    def test_setreporte_invalidado_no_reprograma(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = self._bot_con_gestor_temp(directorio)
+            mensaje = Mock()
+            mensaje.text = "/setreporte abc"
+            mensaje.reply_text = AsyncMock()
+            actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+            cola = Mock()
+            cola.jobs.return_value = []
+            contexto = Mock(job_queue=cola)
+            asyncio.run(bot.setreporte(actualizacion, contexto))
+            cola.run_daily.assert_not_called()
+            self.assertIn("inválido", mensaje.reply_text.call_args[0][0])
+
+    def test_delreporte_elimina_y_reprograma(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = self._bot_con_gestor_temp(directorio)
+            mensaje = Mock()
+            mensaje.text = "/delreporte 15:00"
+            mensaje.reply_text = AsyncMock()
+            actualizacion = Mock(effective_chat=Mock(id=123), message=mensaje)
+            cola = Mock()
+            cola.jobs.return_value = []
+            contexto = Mock(job_queue=cola)
+            asyncio.run(bot.delreporte(actualizacion, contexto))
+            self.assertEqual(bot.gestor_reportes.listar(), ["06:00"])
+            cola.run_daily.assert_called_once()
+
+    def test_comandos_reportes_no_autorizado_no_operan(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = self._bot_con_gestor_temp(directorio)
+            mensaje = Mock()
+            mensaje.text = "/setreporte 6:30"
+            mensaje.reply_text = AsyncMock()
+            actualizacion = Mock(effective_chat=Mock(id=999), message=mensaje)
+            contexto = Mock()
+            asyncio.run(bot.setreporte(actualizacion, contexto))
+            self.assertEqual(bot.gestor_reportes.listar(), ["06:00", "15:00"])
+            mensaje.reply_text.assert_awaited_once_with("Acceso denegado.")
+
+    def test_reprogramar_reportes_usa_zona_horaria(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+            bot.gestor_reportes = GestorReportes(f"{directorio}/horarios.json")
+            bot.funcion_reporte = Mock()
+            nombre_antiguo = "reporte_0600"
+            job_viejo = Mock()
+            job_viejo.name = nombre_antiguo
+            cola = Mock()
+            cola.jobs.return_value = [job_viejo]
+            bot.reprogramar_reportes(cola)
+            job_viejo.schedule_removal.assert_called_once()
+            self.assertEqual(cola.run_daily.call_count, 2)
+            primero = cola.run_daily.call_args_list[0]
+            self.assertEqual(primero.kwargs["name"], "reporte_0600")
+            self.assertEqual(
+                str(primero.kwargs["time"].tzinfo), "America/Argentina/Buenos_Aires"
+            )
+            self.assertEqual(primero.kwargs["time"].hour, 6)
+            self.assertEqual(primero.kwargs["time"].minute, 0)
+
+    def test_zona_horaria_invalida_usa_respaldo(self) -> None:
+        ajustes = Configuracion(
+            TELEGRAM_CHAT_ID="123",
+            ENVIAR_TELEGRAM=False,
+            ZONA_HORARIA="Zona/Inexistente",
+        )
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = BotTelegram(
+                ajustes,
+                gestor_reportes=GestorReportes(f"{directorio}/horarios.json"),
+                funcion_reporte=Mock(),
+            )
+            self.assertEqual(
+                str(bot._zona_horaria(ajustes.ZONA_HORARIA)),
+                "America/Argentina/Buenos_Aires",
+            )
+
+    def test_reprogramar_reportes_quita_el_ruido_y_recrea(self) -> None:
+        with tempfile.TemporaryDirectory() as directorio:
+            bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+            bot.gestor_reportes = GestorReportes(f"{directorio}/horarios.json")
+            bot.funcion_reporte = Mock()
+            cola = Mock()
+            jobs_viejos = [Mock(), Mock()]
+            jobs_viejos[0].name = "reporte_0600"
+            jobs_viejos[1].name = "evaluar_anuncios"
+            for job in jobs_viejos:
+                job.schedule_removal = Mock()
+            cola.jobs.return_value = jobs_viejos
+            bot.reprogramar_reportes(cola)
+            jobs_viejos[0].schedule_removal.assert_called_once()
+            jobs_viejos[1].schedule_removal.assert_not_called()
+            self.assertEqual(cola.run_daily.call_count, 2)
+            nombres = sorted(
+                llamada.kwargs["name"] for llamada in cola.run_daily.call_args_list
+            )
+            self.assertEqual(nombres, ["reporte_0600", "reporte_1500"])
+
+    def test_calcular_proxima_lectura_incluye_reportes_dinamicos(self) -> None:
+        bot = BotTelegram(Configuracion(TELEGRAM_CHAT_ID="123", ENVIAR_TELEGRAM=False))
+        job = Mock()
+        job.name = "reporte_2359"
+        job.next_t = datetime.now(timezone.utc) + timedelta(minutes=10)
+        cola = Mock()
+        cola.jobs.return_value = [job]
+        minutos = bot._calcular_proxima_lectura(Mock(job_queue=cola))
+        self.assertEqual(minutos, 10)
 
 
 if __name__ == "__main__":

@@ -3,10 +3,10 @@
 import asyncio
 import logging
 import time as modulo_tiempo
-from datetime import time
 from pathlib import Path
 from typing import Any
 
+from src.config.gestor_reportes import GestorReportes
 from src.config.reglas_negocio import GestorReglasNegocio
 from src.config.settings import configuracion
 from src.core.brain import MotorDecisiones
@@ -39,8 +39,16 @@ class OrquestadorAsincrono:
                 self.reglas.obtener_todas().keys()
             ),
         )
+        self.gestor_reportes = GestorReportes(
+            Path(__file__).parent / "src" / "config" / "horarios_reportes.json"
+        )
         self.bot = BotTelegram(
-            configuracion, self.reglas, self.meta, self.evaluar_anuncios
+            configuracion,
+            self.reglas,
+            self.meta,
+            self.evaluar_anuncios,
+            gestor_reportes=self.gestor_reportes,
+            funcion_reporte=self.enviar_reporte,
         )
         self._ultima_alerta_fallo: dict[str, float] = {}
 
@@ -107,19 +115,14 @@ class OrquestadorAsincrono:
                 return
 
     def construir_aplicacion(self) -> Any:
-        """Construye el bot y registra los tres jobs programados."""
+        """Construye el bot y registra los jobs programados."""
         aplicacion = self.bot.construir_aplicacion()
         if aplicacion.job_queue is None:
             raise RuntimeError("JobQueue no está disponible; instala el extra job-queue")
         aplicacion.job_queue.run_repeating(
             self.evaluar_anuncios, interval=1800, first=0, name="evaluar_anuncios"
         )
-        aplicacion.job_queue.run_daily(
-            self.enviar_reporte, time=time(hour=6, minute=0), name="reporte_6"
-        )
-        aplicacion.job_queue.run_daily(
-            self.enviar_reporte, time=time(hour=15, minute=0), name="reporte_15"
-        )
+        self.bot.reprogramar_reportes(aplicacion.job_queue)
         return aplicacion
 
 

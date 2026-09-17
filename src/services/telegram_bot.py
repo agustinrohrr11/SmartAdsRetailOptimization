@@ -2,10 +2,12 @@
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.config.gestor_reportes import GestorReportes
 from src.config.settings import Configuracion, configuracion
 from src.services.meta_api import ErrorMetaAds
 
@@ -24,7 +26,7 @@ class BotTelegram:
 + Dias de la semana: L[], MA[], MI[], J[], V[], S[], D[]. rellenar con un punto.
 """
 
-    NOMBRES_JOBS_LECTURA: set[str] = {"evaluar_anuncios", "reporte_6", "reporte_15"}
+    PREFIJO_REPORTE: str = "reporte_"
 
     def __init__(
         self,
@@ -32,6 +34,8 @@ class BotTelegram:
         reglas: Any = None,
         meta: Any = None,
         funcion_medicion: Any = None,
+        gestor_reportes: Any = None,
+        funcion_reporte: Any = None,
     ) -> None:
         from src.config.reglas_negocio import GestorReglasNegocio
 
@@ -42,6 +46,10 @@ class BotTelegram:
         )
         self.meta = meta
         self.funcion_medicion = funcion_medicion
+        self.gestor_reportes = gestor_reportes or GestorReportes(
+            Path(__file__).parents[1] / "config" / "horarios_reportes.json"
+        )
+        self.funcion_reporte = funcion_reporte
         self.ultimo_estado: dict[str, Any] = {"clima": None, "anuncios": []}
         if self.ajustes.ENVIAR_TELEGRAM:
             self.ajustes.validar_telegram()
@@ -67,6 +75,9 @@ class BotTelegram:
         aplicacion.add_handler(CommandHandler("adsconfig", self.ads_config))
         aplicacion.add_handler(CommandHandler("adsinfo", self.adsinfo))
         aplicacion.add_handler(CommandHandler("medir", self.medir))
+        aplicacion.add_handler(CommandHandler("reportes", self.reportes))
+        aplicacion.add_handler(CommandHandler("setreporte", self.setreporte))
+        aplicacion.add_handler(CommandHandler("delreporte", self.delreporte))
         aplicacion.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.procesar_mensaje)
         )
@@ -81,7 +92,10 @@ class BotTelegram:
             "/ads - Lista anuncios y su configuración.\n"
             "/adsconfig [nombre_anuncio] - Muestra la plantilla de configuración.\n"
             "/adsinfo - Muestra el reporte actual con clima y estado de anuncios.\n"
-            "/medir - Fuerza una medición completa ahora."
+            "/medir - Fuerza una medición completa ahora.\n"
+            "/reportes - Lista los horarios de reporte diario.\n"
+            "/setreporte HH:MM - Agrega un horario de reporte diario.\n"
+            "/delreporte HH:MM - Elimina un horario de reporte diario."
         )
 
     async def ads(self, actualizacion: Any, contexto: Any) -> None:
@@ -159,6 +173,100 @@ class BotTelegram:
             )
             return
         await mensaje.reply_text(self._construir_reporte(clima, anuncios))
+
+    async def reportes(self, actualizacion: Any, contexto: Any) -> None:
+        """Lista los horarios de reporte configurados."""
+        if not await self._exigir_chat_autorizado(actualizacion):
+            return
+        try:
+            horarios = self.gestor_reportes.listar()
+        except (OSError, ValueError, KeyError):
+            logger.exception("No se pudo leer los horarios de reporte")
+            await actualizacion.message.reply_text(
+                "No se pudo leer la configuración de horarios. Revisá el archivo."
+            )
+            return
+        if not horarios:
+            await actualizacion.message.reply_text(
+                "No hay reportes diarios configurados."
+            )
+            return
+        lineas = "\n".join(f"- {horario}" for horario in horarios)
+        await actualizacion.message.reply_text(
+            "HORARIOS DE REPORTE\n\n" + lineas
+        )
+
+    async def setreporte(self, actualizacion: Any, contexto: Any) -> None:
+        """Agrega un horario de reporte (ej: /setreporte 6:00)."""
+        if not await self._exigir_chat_autorizado(actualizacion):
+            return
+        texto = actualizacion.message.text if actualizacion.message is not None else ""
+        argumento = texto.split(None, 1)[1].strip() if len(texto.split(None, 1)) > 1 else ""
+        try:
+            exito, mensaje = self.gestor_reportes.agregar(argumento)
+        except (OSError, ValueError, KeyError):
+            logger.exception("No se pudo guardar el horario de reporte")
+            await actualizacion.message.reply_text(
+                "No se pudo guardar el horario. Revisá los logs."
+            )
+            return
+        if exito:
+            self.reprogramar_reportes(contexto.job_queue)
+        await actualizacion.message.reply_text(mensaje)
+
+    async def delreporte(self, actualizacion: Any, contexto: Any) -> None:
+        """Elimina un horario de reporte (ej: /delreporte 6:00)."""
+        if not await self._exigir_chat_autorizado(actualizacion):
+            return
+        texto = actualizacion.message.text if actualizacion.message is not None else ""
+        argumento = texto.split(None, 1)[1].strip() if len(texto.split(None, 1)) > 1 else ""
+        try:
+            exito, mensaje = self.gestor_reportes.eliminar(argumento)
+        except (OSError, ValueError, KeyError):
+            logger.exception("No se pudo eliminar el horario de reporte")
+            await actualizacion.message.reply_text(
+                "No se pudo eliminar el horario. Revisá los logs."
+            )
+            return
+        if exito:
+            self.reprogramar_reportes(contexto.job_queue)
+        await actualizacion.message.reply_text(mensaje)
+
+    def reprogramar_reportes(self, cola_jobs: Any) -> None:
+        """Recrea los jobs de reporte según los horarios guardados."""
+        if cola_jobs is None or self.funcion_reporte is None:
+            logger.warning("Sin JobQueue o función de reporte; no se reprograman reportes")
+            return
+        for job in cola_jobs.jobs():
+            nombre = getattr(job, "name", "") or ""
+            if nombre.startswith(self.PREFIJO_REPORTE):
+                job.schedule_removal()
+        zona = self._zona_horaria(self.ajustes.ZONA_HORARIA)
+        for horario in self.gestor_reportes.listar():
+            horas, minutos = horario.split(":")
+            nombre = f"{self.PREFIJO_REPORTE}{horario.replace(':', '')}"
+            cola_jobs.run_daily(
+                self.funcion_reporte,
+                time=time(
+                    hour=int(horas),
+                    minute=int(minutos),
+                    tzinfo=zona,
+                ),
+                name=nombre,
+            )
+            logger.info("Reporte diario programado a las %s", horario)
+
+    @classmethod
+    def _zona_horaria(cls, nombre_zona: str) -> ZoneInfo:
+        """Devuelve la zona IANA configurada, con respaldo si es inválida."""
+        try:
+            return ZoneInfo(nombre_zona)
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning(
+                "ZONA_HORARIA inválida '%s'; se usa America/Argentina/Buenos_Aires",
+                nombre_zona,
+            )
+            return ZoneInfo("America/Argentina/Buenos_Aires")
 
     async def ads_config(self, actualizacion: Any, contexto: Any) -> None:
         """Entrega la plantilla y recuerda el anuncio a configurar."""
@@ -349,9 +457,11 @@ class BotTelegram:
         ahora = datetime.now(timezone.utc)
         proximas = []
         for job in job_queue.jobs():
-            nombre = getattr(job, "name", None)
+            nombre = getattr(job, "name", None) or ""
             next_t = getattr(job, "next_t", None)
-            if nombre in cls.NOMBRES_JOBS_LECTURA and next_t is not None:
+            if not next_t:
+                continue
+            if nombre == "evaluar_anuncios" or nombre.startswith(cls.PREFIJO_REPORTE):
                 proximas.append(next_t)
         if not proximas:
             return None
